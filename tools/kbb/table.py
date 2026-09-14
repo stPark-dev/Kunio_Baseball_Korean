@@ -12,9 +12,8 @@ NEWLINE = 0xA0
 DAKUTEN = 0xD0
 HANDAKUTEN = 0xE0
 VARIABLE = 0xF0    # followed by one byte: name/number substitution
-PAUSE = 0xF3
 
-CONTROL = {END, SPACE, NEWLINE, DAKUTEN, HANDAKUTEN, VARIABLE, PAUSE}
+CONTROL = {END, SPACE, NEWLINE, DAKUTEN, HANDAKUTEN, VARIABLE}
 
 # Columns 0x_9/0x_A/0x_B: katakana, 0x_D/0x_E/0x_F: hiragana, 0x_8: small kana and
 # punctuation, 0x_C: small hiragana (rows 7-F). Column 0 is blank (used by controls).
@@ -52,8 +51,6 @@ TABLE.update({
     0xA2: "際", 0xA6: "術", 0xA7: "衆", 0xB1: "法", 0xB2: "波", 0xB6: "飛", 0xC1: "右", 0xC6: "剪",
     0xD1: "左", 0xD6: "新", 0xE1: "龍", 0xE6: "麗", 0xF1: "魔", 0xF2: "打", 0xF6: "君",
 })
-# The PAUSE control shares its byte with the "?" glyph slot; the control wins in text.
-del TABLE[0xF3]
 
 REVERSE = {ch: code for code, ch in TABLE.items()}
 

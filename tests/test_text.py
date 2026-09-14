@@ -15,9 +15,9 @@ def test_handakuten_and_small_tsu():
     assert text == "ピッチ"
 
 
-def test_variable_and_pause_are_marked():
+def test_variable_is_marked_and_f3_is_question_mark():
     text, _ = decode(bytes([0xF0, 0x42, 0xF3, 0x00]), 0)
-    assert text == "{VAR:42}{PAUSE}"
+    assert text == "{VAR:42}?"
 
 
 def test_unknown_byte_is_shown_as_hex():

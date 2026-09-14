@@ -59,8 +59,6 @@ def decode(data, offset):
         elif b == T.VARIABLE:
             out.append("{VAR:%02X}" % data[i])
             i += 1
-        elif b == T.PAUSE:
-            out.append("{PAUSE}")
         elif b in T.TABLE:
             out.append(T.TABLE[b])
         else:
