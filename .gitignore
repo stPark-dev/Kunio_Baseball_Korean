@@ -1,0 +1,8 @@
+# 게임 롬은 저장소에 포함하지 않는다
+*.sfc
+*.smc
+*.zip
+*.srm
+build/
+__pycache__/
+*.pyc
