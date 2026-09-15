@@ -417,7 +417,7 @@ do_space:
 ; Y = address -> A = pixel width of the glyphs up to the next 00/02/A0/F0
 measure_word:
         lda #0
-        sta f:z_tmp+Z+$7E0000
+        sta f:z_val+Z+$7E0000
 @next:  lda $0000,y
         and #$00FF
         beq @done
@@ -432,10 +432,10 @@ measure_word:
         lda f:WIDTHS,x
         and #$00FF
         clc
-        adc f:z_tmp+Z+$7E0000
-        sta f:z_tmp+Z+$7E0000
+        adc f:z_val+Z+$7E0000
+        sta f:z_val+Z+$7E0000
         bra @next
-@done:  lda f:z_tmp+Z+$7E0000
+@done:  lda f:z_val+Z+$7E0000
         rts
 
 sfx:
