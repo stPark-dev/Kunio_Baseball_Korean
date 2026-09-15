@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 
-from tools.kbb import encode, glyphs, script, text
+from tools.kbb import encode, font8, glyphs, ingame, script, text
 from tools.kbb import labels as L
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -27,18 +27,24 @@ WIDTHS_ROM = CODE_ROM + 0x1000
 WIDTHS_LIMIT = 0x3000
 GLYPH_ROM = 0x190000
 GLYPHS_PER_BANK = 0x400
+GLYPH8_ROM = 0x198000                        # $B3:8000, 16 bytes per glyph id (8x8 Korean)
+INGAME_FONT_ROM = 0x19B000                   # $B3:B000, 4 KB font block for the match screens
+INGAME_FONT_SITE = 0x0067D9                  # source address bytes of the in-game font DMA descriptor (cmd 1C)
+# cmd 06 descriptors "06 bank size16 src16 vram16" that load the 8x8 font to VRAM $C000 during matches
+INGAME_FONT_SITES06 = (0x000E57, 0x0016B4, 0x0017FE, 0x00190E)
+POOL8_ROM = CODE_ROM + 0x3E00                # $B1:BE00: u16 count, then dynamic 8x8 slot numbers
 ASM_SOURCE = os.path.join(ROOT, "tools", "kbb", "asm", "text.s")
 ASM_CONFIG = os.path.join(ROOT, "tools", "kbb", "asm", "bank.cfg")
 CC65_BIN = os.environ.get("CC65_BIN", "")
 
 CODE_ENTRY = 0xB18000
 (ENTRY_START, ENTRY_MAIN, ENTRY_NESTED, ENTRY_NMI, ENTRY_LABEL,
- ENTRY_GAME_START, ENTRY_GAME_MAIN, ENTRY_GAME_NESTED) = (CODE_ENTRY + 4 * k for k in range(8))
+ ENTRY_GAME_START, ENTRY_GAME_MAIN, ENTRY_GAME_NESTED, ENTRY_HUD_NAME) = (CODE_ENTRY + 4 * k for k in range(9))
 GAME_PX = 176          # in-game commentary window: 22 columns
 # The in-game hooks work in isolation but every byte of VRAM is in use during a match
 # (BG1 has a 64x64 tilemap at $E000-$FFFF), so there is no room for the glyph cache yet.
 # Keep the original Japanese commentary until an in-game font plan exists (see README).
-GAME_TEXT = False
+GAME_TEXT = True
 LABEL_TABLE_ROM = CODE_ROM + 0x4000          # $B1:C000, u16 string offsets then strings
 RESERVED_ROM = CODE_ROM + 0x3F00             # $B1:BF00, 64-byte bitmap of kanji tiles to keep
 # 16x16 glyphs drawn by screens whose data is not located yet (versus title, pre-game menu)
@@ -95,6 +101,8 @@ def patches(table_addr, game_text=GAME_TEXT):
         (0x024DA4, b"\xAF\x36\x69\x7E", jml(ENTRY_GAME_NESTED)),
         (0x024E2C, b"\xA9\x86\x86", b"\xA9\xB0\xB0"),
         (0x024F09, b"\xA9\x86\x86", b"\xA9\xB0\xB0"),
+        # HUD player names (bank $0E)
+        (0x0777B2, b"\xA5\x22\x0A\xAA", jml(ENTRY_HUD_NAME)),
     ]
     return base + (game if game_text else [])
 
@@ -107,11 +115,12 @@ def apply_patches(rom, plist):
         rom[off:off + len(new)] = new
 
 
-def assemble():
+def assemble(defines=()):
     with tempfile.TemporaryDirectory() as tmp:
         obj = os.path.join(tmp, "text.o")
         out = os.path.join(tmp, "text.bin")
-        subprocess.run([os.path.join(CC65_BIN, "ca65"), "--cpu", "65816", "-o", obj, ASM_SOURCE], check=True)
+        flags = ["-D%s=%d" % kv for kv in defines]
+        subprocess.run([os.path.join(CC65_BIN, "ca65"), "--cpu", "65816"] + flags + ["-o", obj, ASM_SOURCE], check=True)
         subprocess.run([os.path.join(CC65_BIN, "ld65"), "-C", ASM_CONFIG, "-o", out, obj], check=True)
         return open(out, "rb").read()
 
@@ -195,7 +204,33 @@ def reserved_bitmap(rom, all_rows, translated):
     return bytes(bits)
 
 
-def build(original, csv_path=None, labels_csv=None, log=print):
+def load_ingame(csv_path):
+    if not csv_path or not os.path.exists(csv_path):
+        return []
+    with open(csv_path, encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+def ingame_font(original, rows):
+    """(font block, static {char: tile}, pool tiles) for the match screens."""
+    chars = sorted({c for r in rows for c in r.get("korean", "") if "가" <= c <= "힣"})
+    if len(chars) > len(font8.FREE) - 64:
+        raise BuildError("too many static in-game syllables: %d" % len(chars))
+    static = dict(zip(chars, font8.FREE))
+    block, pool = font8.build_block(original[0x0B47E5:0x0B47E5 + 0x1000], static)
+    return block, static, pool
+
+
+def glyph8_table(gs):
+    """16 bytes per glyph id, Galmuri7 8x8 rendering of the same character set."""
+    out = bytearray(gs.count * 16)
+    missing = font8.tile8("?")
+    for ch, idx in gs.index.items():
+        out[idx * 16:(idx + 1) * 16] = font8.tile8(ch) or missing
+    return bytes(out)
+
+
+def build(original, csv_path=None, labels_csv=None, ingame_csv=None, log=print):
     if hashlib.md5(original).hexdigest() != ORIGINAL_MD5:
         raise BuildError("original ROM md5 mismatch")
     rom = bytearray(original) + b"\xFF" * (ROM_SIZE - len(original))
@@ -226,7 +261,25 @@ def build(original, csv_path=None, labels_csv=None, log=print):
         px = sum(width_of.get(c, 12) if c != " " else encode.SPACE_W for c in r["korean"])
         if px > int(r["n"]) * 8:
             log("label too wide (%dpx > %dpx): %s %s" % (px, int(r["n"]) * 8, r["id"], r["korean"]))
-    code = assemble()
+    code = assemble([("SURNAME_TABLE", table_addr["surname"])])
+    ingame_rows = load_ingame(ingame_csv)
+    if ingame_rows:
+        block, static, pool = ingame_font(original, ingame_rows)
+        rom[INGAME_FONT_ROM:INGAME_FONT_ROM + len(block)] = block
+        snes = 0x800000 | (INGAME_FONT_ROM // 0x8000 << 16) | 0x8000 | (INGAME_FONT_ROM % 0x8000)
+        rom[INGAME_FONT_SITE:INGAME_FONT_SITE + 3] = struct.pack("<I", snes)[:3]
+        for site in INGAME_FONT_SITES06:
+            if bytes(rom[site:site + 8]) != b"\x06\x96\x00\x10\xE5\xC7\x00\x60":
+                raise BuildError("unexpected font descriptor at %06X" % site)
+            rom[site + 1] = snes >> 16
+            struct.pack_into("<H", rom, site + 4, snes & 0xFFFF)
+        for r in ingame_rows:
+            if r.get("korean"):
+                ingame.encode_record(rom, int(r["offset"], 16), r["korean"], static)
+        rom[POOL8_ROM:POOL8_ROM + 2 + len(pool)] = struct.pack("<H", len(pool)) + bytes(pool)
+        g8 = glyph8_table(gs)
+        rom[GLYPH8_ROM:GLYPH8_ROM + len(g8)] = g8
+        log("in-game font: %d static syllables, %d dynamic slots" % (len(static), len(pool)))
     ltab = label_table(label_rows, gs)
     rom[LABEL_TABLE_ROM:LABEL_TABLE_ROM + len(ltab)] = ltab
     rom[RESERVED_ROM:RESERVED_ROM + 64] = reserved_bitmap(original, L.extract(original), label_rows)
@@ -247,10 +300,11 @@ def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     csv_path = os.path.join(ROOT, "translations", "strings.csv")
     labels_csv = os.path.join(ROOT, "translations", "labels.csv")
+    ingame_csv = os.path.join(ROOT, "translations", "ingame.csv")
     if "--csv" in sys.argv:
         csv_path = sys.argv[sys.argv.index("--csv") + 1]
     original = open(args[0], "rb").read()
-    rom, _ = build(original, csv_path, labels_csv)
+    rom, _ = build(original, csv_path, labels_csv, ingame_csv)
     open(args[1], "wb").write(rom)
     print("wrote", args[1], len(rom), "bytes")
 

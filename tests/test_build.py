@@ -47,3 +47,22 @@ def test_label_table_and_marking():
     assert struct.unpack_from("<H", rom, top)[0] == 0xC000
     assert struct.unpack_from("<H", rom, top + 8)[0] == 0xD000
     assert rom[top + 2:top + 8] == b"\x00" * 6
+
+
+def test_ingame_font_block_keeps_digits_and_places_static_syllables():
+    from tools.kbb import font8
+    font = bytes(range(256)) * 16
+    block, pool = font8.build_block(font, {"가": font8.FREE[0]})
+    assert block[0x03 * 16:0x04 * 16] == font[0x03 * 16:0x04 * 16]       # digit slot untouched
+    assert block[font8.FREE[0] * 16:(font8.FREE[0] + 1) * 16] == font8.tile8("가")
+    assert font8.FREE[0] not in pool and 0x03 not in pool
+
+
+def test_encode_record_writes_words_in_place():
+    from tools.kbb import ingame
+    rom = bytearray(64)
+    struct.pack_into("<HH", rom, 0, 0x16, 1)
+    ingame.encode_record(rom, 0, "가 1", {"가": 0x09})
+    words = struct.unpack_from("<11H", rom, 4)
+    assert words[:3] == (0x2009, 0x2002, 0x2013)
+    assert words[3:] == (0x2002,) * 8

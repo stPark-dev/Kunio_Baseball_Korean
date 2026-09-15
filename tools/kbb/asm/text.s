@@ -74,7 +74,23 @@ G_CELL          = $7E691D       ; VRAM word address of the next cell
 GST     = $7E14E0
 G_BASE  = GST+0                 ; VRAM word address of the first cell of line 0
 MODE    = GST+2                 ; 0 = dialogue window, 1 = in-game commentary
+G_DROP  = GST+4                 ; nonzero: no room left, swallow the rest of the message
+G_COL   = GST+6                 ; cells used on the current line
+D_NEXT  = GST+8                 ; next dynamic 8x8 slot to reuse
+D_TMP   = GST+10
+D_ID    = GST+12
 GAME_COLS = 22
+GAME_LINE2 = $3F                ; second line starts at base + $3F (as the original)
+HUD_NAME_CONT = $0EF805         ; after the name cells are built
+HUD_CELLS = 5                   ; cells queued per name
+G_CELLWORD = $7E6921            ; the original's cell word for the VRAM queue
+G_BLANK    = $7E8C1E            ; constant blank cell word ($2002): the queue DMAs later, so a
+                                ; space queued in the same frame as a glyph needs its own source
+
+; dynamic 8x8 glyph cache for the match screens (font at BG3 base, 16 bytes per tile)
+GLYPH8  = $B38000               ; 16 bytes per glyph id
+POOL8   = $B1BE00               ; u16 count, then the free font slots
+D_MAP   = $7E9A80               ; glyph id held by each pool slot (u16 each)
 
 ; ---- pre-drawn labels (menus, team names): hook on the row writer $91B390 ----
 ORIG_ROW_WRITER = $11B395       ; after PHP PHB PHD REP #$30
@@ -145,6 +161,7 @@ z_i     = $32
         jml kbb_game_start      ; $B18014
         jml kbb_game_main       ; $B18018
         jml kbb_game_nested     ; $B1801C
+        jml kbb_hud_name        ; $B18020
 
 bit_table:
         .word $0001, $0002, $0004, $0008, $0010, $0020, $0040, $0080
@@ -1083,155 +1100,286 @@ ring_push:
         sta f:R_TAIL
         rts
 
-; ---- in-game commentary hooks ------------------------------------------------
+; ---- in-game text: 8x8 dynamic glyph cache ----------------------------------
+; A = glyph id -> A = font tile number. Misses take the next pool slot and queue
+; the tile bytes (Galmuri7) for upload. DP-free; clobbers X, Y.
+d_get:
+        sta f:D_ID
+        lda #0
+        sta f:D_TMP             ; slot index
+@scan:  lda f:D_TMP
+        cmp f:POOL8             ; count
+        bcs @miss
+        asl
+        tax
+        lda f:D_MAP,x
+        cmp f:D_ID
+        beq @hit
+        lda f:D_TMP
+        inc
+        sta f:D_TMP
+        bra @scan
+@hit:   lda f:D_TMP
+        tax
+        lda f:POOL8+2,x
+        and #$00FF
+        sta f:D_TMP
+        bra @send               ; re-send: a view change may have reloaded the font block
+@miss:  lda f:D_NEXT
+        cmp f:POOL8
+        bcc @slot
+        lda #0
+@slot:  sta f:D_TMP
+        inc
+        sta f:D_NEXT
+        lda f:D_TMP
+        asl
+        tax
+        lda f:D_ID
+        sta f:D_MAP,x
+        lda f:D_TMP
+        tax
+        lda f:POOL8+2,x
+        and #$00FF
+        sta f:D_TMP             ; tile
+@send:  ; VRAM word = (BG3 base nibble << 12) + tile * 8
+        lda f:BG34NBA_SHADOW
+        and #$0007
+        xba
+        asl
+        asl
+        asl
+        asl
+        sta f:z_val+Z+$7E0000
+        lda f:D_TMP
+        asl
+        asl
+        asl
+        clc
+        adc f:z_val+Z+$7E0000
+        sta f:z_val+Z+$7E0000
+        lda f:D_ID
+        asl
+        asl
+        asl
+        asl
+        clc
+        adc #.loword(GLYPH8)
+        sta f:z_dst+Z+$7E0000
+        jsr ring_push_rom
+        lda f:D_TMP
+        rts
+
+; Append (z_val = VRAM word, 16 bytes at GLYPH8 bank offset z_dst) to the upload ring.
+ring_push_rom:
+        lda #$4000
+        sta f:z_spill+Z+$7E0000
+@wait:  lda f:R_TAIL
+        clc
+        adc #RING_ENTRY
+        cmp #RING_BYTES
+        bcc @nowrap
+        lda #0
+@nowrap:
+        cmp f:R_HEAD
+        bne @room
+        lda f:z_spill+Z+$7E0000
+        dec
+        sta f:z_spill+Z+$7E0000
+        bne @wait
+        rts
+@room:  sta f:z_shift+Z+$7E0000
+        lda f:R_TAIL
+        tax
+        lda f:z_val+Z+$7E0000
+        sta f:RING,x
+        ldy #0
+@cp:    phx
+        tya
+        clc
+        adc f:z_dst+Z+$7E0000
+        tax
+        lda f:GLYPH8&$FF0000,x
+        plx
+        inx
+        inx
+        sta f:RING,x
+        iny
+        iny
+        cpy #16
+        bne @cp
+        lda f:z_shift+Z+$7E0000
+        sta f:R_TAIL
+        rts
+
+; ---- HUD player name: replaces LDA $22 / ASL / TAX at $0E:F7B2 -------------
+; DP = task frame with $00-$0F (upper row) and $10-$1F (name row) already blank.
+kbb_hud_name:
+        lda $22
+        asl
+        tax
+        lda f:$7E307F,x
+        asl
+        asl
+        tax
+        pea SCRIPT_BANK*256+SCRIPT_BANK
+        plb
+        plb
+        lda a:SURNAME_TABLE,x
+        tay
+        ldx #0
+@ch:    lda $0000,y
+        and #$00FF
+        beq @done
+        cmp #$0002
+        beq @space
+        cmp #$0080
+        bcs @glyph
+        cmp #$00A0
+        bcs @skip               ; control bytes above the glyph range
+@glyph: phx
+        jsr get_index
+        phy
+        jsr d_get
+        ply
+        plx
+        ora #$2000
+        sta $10,x
+        inx
+        inx
+        cpx #HUD_CELLS*2
+        bcc @ch
+        bra @done
+@space: iny
+        inx
+        inx
+        cpx #HUD_CELLS*2
+        bcc @ch
+        bra @done
+@skip:  iny
+        bra @ch
+@done:  jml HUD_NAME_CONT
+
+; ---- in-game commentary hooks (8x8 cells written through the VRAM queue) -----
 ; Message start: replaces TAX / BRL $CC37 at $04:CB34 (G_PTR already holds the string).
 kbb_game_start:
+        lda #$2002
+        sta f:G_BLANK
         lda #1
         sta f:MODE
         lda #0
-        sta f:PEN_X
         sta f:LINE
+        sta f:G_DROP
+        sta f:G_COL
         lda f:G_CELL
         sta f:G_BASE
-        and #$001F
-        sta f:XCOL0             ; column of the first cell
-        lda #32
-        sec
-        sbc f:XCOL0
-        cmp #GAME_COLS
-        bcc @cols_ok
-        lda #GAME_COLS
-@cols_ok:
-        sta f:NCOLS
-        asl
-        asl
-        asl
-        sta f:MAX_PX
-        jsr cache_setup
-        ; queue the cache tile numbers into the 4 tilemap rows of the window
-        lda #0
-        sta f:C_ROW
-@row:   lda f:C_ROW             ; each row gets its own staging buffer: the queue DMAs later
-        asl
-        asl
-        asl
-        asl
-        asl
-        asl
-        tax
-        lda #0
-        sta f:C_COL
-@col:   lda f:C_COL
-        asl
-        asl
-        clc
-        adc f:C_ROW
-        clc
-        adc f:CTILE
-        ora #$2000
-        sta f:STAGE,x
-        inx
-        inx
-        lda f:C_COL
-        inc
-        sta f:C_COL
-        cmp f:NCOLS
-        bne @col
-@queue: lda f:C_ROW
-        asl
-        asl
-        asl
-        asl
-        asl                     ; row * 32 words
-        clc
-        adc f:G_BASE
-        sec
-        sbc #32                 ; first row is the one above the base cell
-        tay
-        lda f:C_ROW
-        asl
-        asl
-        asl
-        asl
-        asl
-        asl
-        clc
-        adc #.loword(STAGE)
-        tax
-        lda f:NCOLS
-        asl
-        phb
-        pea $7E7E               ; the queue records the caller's data bank as the DMA source bank
-        plb
-        plb
-        jsl VRAM_QUEUE
-        plb
-        bcc @queued
-        lda #0
-        jsl TASK_WAIT           ; queue full: wait a frame and retry
-        bra @queue
-@queued:
-        lda f:C_ROW
-        inc
-        sta f:C_ROW
-        cmp #4
-        beq @rows_done
-        jmp @row
-@rows_done:
-        lda #(BUF_COLS-1)*256
-        sta f:RANGE
-        lda #FLAG_MAGIC
-        sta f:FLAG
         jml GAME_MAIN_HEAD
 
-; G_CELL = line base + ceil(PEN_X / 8) so that the original number printer lands
-; right after the text; afterwards the pen catches up with G_CELL.
-game_sync_cell:
-        lda f:PEN_X
-        clc
-        adc #7
-        lsr
-        lsr
-        lsr
-        clc
-        adc f:G_BASE
-        pha
-        lda f:LINE
-        beq @l0
-        pla
-        clc
-        adc #64
-        pha
-@l0:    pla
+; write cell word A at G_CELL through the queue, then G_CELL++ / G_COL++
+game_put_cell:
+        sta f:G_CELLWORD
+        ldx #.loword(G_CELLWORD)
+game_put_from:                  ; X = WRAM address of the cell word
+        phx
+        phb
+        pea $7E7E
+        plb
+        plb
+@retry: lda f:G_CELL
+        tay
+        lda 2,s
+        tax
+        lda #2
+        jsl VRAM_QUEUE
+        bcc @ok
+        lda #0
+        jsl TASK_WAIT
+        bra @retry
+@ok:    plb
+        plx
+        lda f:G_CELL
+        inc
         sta f:G_CELL
+        lda f:G_COL
+        inc
+        sta f:G_COL
         rts
 
-game_resync_pen:
+game_newline:
         lda f:LINE
-        tax
-        lda f:G_CELL
-        sec
-        sbc f:G_BASE
-        cpx #0
-        beq @l0
-        sec
-        sbc #64
-@l0:    bmi @done
-        asl
-        asl
-        asl
-        cmp f:PEN_X
-        bcc @done
+        bne @full
+        inc
+        sta f:LINE
+        lda f:G_BASE
+        clc
+        adc #GAME_LINE2
+        sta f:G_CELL
+        lda #0
+        sta f:G_COL
+        rts
+@full:  lda #1
+        sta f:G_DROP
+        rts
+
+; Y = address of the next word -> A = number of glyphs up to the next 00/02/A0/F0
+game_word_cells:
+        lda #0
+        sta f:z_val+Z+$7E0000
+@next:  lda $0000,y
+        and #$00FF
         beq @done
-        sta f:PEN_X
+        cmp #$0002
+        beq @done
+        cmp #$00A0
+        beq @done
+        cmp #$00F0
+        beq @done
+        jsr get_index
+        lda f:z_val+Z+$7E0000
+        inc
+        sta f:z_val+Z+$7E0000
+        bra @next
+@done:  lda f:z_val+Z+$7E0000
+        rts
+
+; Y = address after the space: wrap if the next word does not fit on this line
+game_space:
+        jsr game_word_cells
+        clc
+        adc f:G_COL
+        inc
+        cmp #GAME_COLS+1
+        bcs game_newline
+        lda f:G_DROP
+        bne @done
+        ldx #.loword(G_BLANK)
+        jsr game_put_from
 @done:  rts
 
-; Main string step: replaces LDA $7E6933 at $04:CC37. DB is set to the script bank.
+; A = glyph index: draw one 8x8 cell unless the line is full
+game_glyph:
+        pha
+        lda f:G_DROP
+        bne @drop
+        lda f:G_COL
+        cmp #GAME_COLS
+        bcc @ok
+        jsr game_newline        ; word longer than the line: continue on the next line
+        lda f:G_DROP
+        bne @drop
+@ok:    pla
+        jsr d_get
+        ora #$2000
+        jsr game_put_cell
+        rts
+@drop:  pla
+        rts
+
+; Main string step: replaces LDA $7E6933 at $04:CC37.
 kbb_game_main:
         pea SCRIPT_BANK*256+SCRIPT_BANK
         plb
         plb
-        jsr game_resync_pen
         lda f:G_PTR
         tay
         lda $0000,y
@@ -1244,24 +1392,25 @@ kbb_game_main:
         cmp #$00F0
         beq @var
         jsr get_index
+        pha
         tya
         sta f:G_PTR
-        jsr draw_glyph
+        pla
+        jsr game_glyph
         jml GAME_WAIT
 @end:   jml GAME_MAIN_CONT
 @newline:
         iny
         tya
         sta f:G_PTR
-        jsr do_newline
+        jsr game_newline
         bra kbb_game_main
 @space: iny
         tya
         sta f:G_PTR
-        jsr do_space
+        jsr game_space
         bra kbb_game_main
-@var:   jsr game_sync_cell
-        jml GAME_VAR
+@var:   jml GAME_VAR
 
 ; Nested string step: replaces LDA $7E6936 at $04:CB4A and $04:CDA4.
 kbb_game_nested:
@@ -1280,21 +1429,23 @@ kbb_game_nested:
         cmp #$0002
         beq @space
         jsr get_index
+        pha
         tya
         sta f:G_NPTR
-        jsr draw_glyph
+        pla
+        jsr game_glyph
         jml GAME_WAIT
 @end:   jml GAME_NEST_END
 @newline:
         iny
         tya
         sta f:G_NPTR
-        jsr do_newline
+        jsr game_newline
         bra kbb_game_nested
 @space: iny
         tya
         sta f:G_NPTR
-        jsr do_space
+        jsr game_space
         bra kbb_game_nested
 
 ; ---- NMI hook: upload the dirty columns to VRAM when flagged ----------------
