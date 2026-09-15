@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 
-from tools.kbb import bg2, encode, font8, glyphs, grid, ingame, script, text
+from tools.kbb import bg2, encode, font8, glyphs, grid, ingame, script, static8, text
 from tools.kbb import labels as L
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -33,13 +33,20 @@ INGAME_FONT_SITE = 0x0067D9                  # source address bytes of the in-ga
 # cmd 06 descriptors "06 bank size16 src16 vram16" that load the 8x8 font to VRAM $C000 during matches
 INGAME_FONT_SITES06 = (0x000E57, 0x0016B4, 0x0017FE, 0x00190E)
 POOL8_ROM = CODE_ROM + 0x3E00                # $B1:BE00: u16 count, then dynamic 8x8 slot numbers
+MPOOL_ROM = CODE_ROM + 0x3E80                # $B1:BE80: u16 count, then menu font slots for roster names
+SHIFT_ROM = CODE_ROM + 0x3D00                # $B1:BD00: 8 x 4-byte pointers, then the shift strings
+TABLE_LIST_ROM = CODE_ROM + 0x3D80           # $B1:BD80: the lineup task's 7 table addresses (new bank)
+TABLE_LIST = ("surname", "name_extra1", "name_extra2", "name_set3", "name_set4", "name_set5", "item")
+MENU_POOL = [t for t in range(256) if t & 0xF in (0x9, 0xA, 0xB, 0xD, 0xE, 0xF) and t != 0x0D]
 ASM_SOURCE = os.path.join(ROOT, "tools", "kbb", "asm", "text.s")
 ASM_CONFIG = os.path.join(ROOT, "tools", "kbb", "asm", "bank.cfg")
 CC65_BIN = os.environ.get("CC65_BIN", "")
 
 CODE_ENTRY = 0xB18000
 (ENTRY_START, ENTRY_MAIN, ENTRY_NESTED, ENTRY_NMI, ENTRY_LABEL,
- ENTRY_GAME_START, ENTRY_GAME_MAIN, ENTRY_GAME_NESTED, ENTRY_HUD_NAME) = (CODE_ENTRY + 4 * k for k in range(9))
+ ENTRY_GAME_START, ENTRY_GAME_MAIN, ENTRY_GAME_NESTED, ENTRY_HUD_NAME,
+ ENTRY_ROSTER_NAME, ENTRY_ROSTER_SHIFT, ENTRY_ROSTER_ITEM, ENTRY_ROSTER_W4,
+ ENTRY_ROSTER_FULL, ENTRY_ROSTER_FULL7F) = (CODE_ENTRY + 4 * k for k in range(15))
 GAME_PX = 176          # in-game commentary window: 22 columns
 # The in-game hooks work in isolation but every byte of VRAM is in use during a match
 # (BG1 has a 64x64 tilemap at $E000-$FFFF), so there is no room for the glyph cache yet.
@@ -48,7 +55,7 @@ GAME_TEXT = True
 LABEL_TABLE_ROM = CODE_ROM + 0x4000          # $B1:C000, u16 string offsets then strings
 RESERVED_ROM = CODE_ROM + 0x3F00             # $B1:BF00, 64-byte bitmap of kanji tiles to keep
 # 16x16 glyphs drawn by screens whose data is not located yet (versus title, pre-game menu)
-RESERVED_GLYPHS = "熱血野球大会対先発火小変更打順守備選手デタ"
+RESERVED_GLYPHS = "熱血野球大会対先発火小変更打順守備選手デタ自敵チム"
 LABEL_TABLE_LIMIT = 0x4000
 LABEL_MARK_TOP, LABEL_MARK_BOTTOM = 0xC000, 0xD000
 ROW_WRITER_ROM = 0x08B390
@@ -103,6 +110,14 @@ def patches(table_addr, game_text=GAME_TEXT):
         (0x024F09, b"\xA9\x86\x86", b"\xA9\xB0\xB0"),
         # HUD player names (bank $0E)
         (0x0777B2, b"\xA5\x22\x0A\xAA", jml(ENTRY_HUD_NAME)),
+        (0x016A8B, b"\xAD\x9D\x71\x0A", jml(ENTRY_ROSTER_NAME)),     # $82:EA8B surname rows
+        (0x016B2F, b"\xAD\x9D\x71\x0A", jml(ENTRY_ROSTER_SHIFT)),    # $82:EB2F defensive-shift rows
+        (0x016ADD, b"\xAD\x9D\x71\x0A", jml(ENTRY_ROSTER_ITEM)),     # $82:EADD item rows
+        (0x0142E4, b"\xF4\x06\x00", b"\xF4\xB0\x00"),                 # lineup task: DB = new script bank
+        (0x0142ED, b"\xBF\xB8\xC2\x82", b"\xBF" + struct.pack("<H", 0x8000 | TABLE_LIST_ROM % 0x8000) + b"\xB1"),
+        (0x014300, b"\xA4\x34\xB1\x32", jml(ENTRY_ROSTER_W4)),       # lineup task char loop
+        (0x08395D, b"\xAD\x9D\x71\x0A", jml(ENTRY_ROSTER_FULL)),     # $90:B95D full-name rows
+        (0x081456, b"\xBF\xD3\x8B\x86", jml(ENTRY_ROSTER_FULL7F)),   # $90:9456 player list in the $7F shadow
     ]
     return base + (game if game_text else [])
 
@@ -245,13 +260,30 @@ def glyph8_table(gs):
     return bytes(out)
 
 
-def build(original, csv_path=None, labels_csv=None, ingame_csv=None, teams_csv=None, bg2_csv=None, log=print):
+def shift_table(rows, gs):
+    """Defensive-shift menu strings for the roster hook: 4-byte pointers then the strings."""
+    strings = [gs.encode(r["korean"]) if r.get("korean") else b"\x00" for r in rows]
+    base = 0x8000 | (SHIFT_ROM % 0x8000)
+    out = bytearray()
+    pos = base + 4 * len(strings)
+    for s in strings:
+        out += struct.pack("<I", pos)
+        pos += len(s)
+    for s in strings:
+        out += s
+    return bytes(out)
+
+
+def build(original, csv_path=None, labels_csv=None, ingame_csv=None, teams_csv=None, bg2_csv=None,
+          roster_csv=None, static8_csv=None, log=print):
     if hashlib.md5(original).hexdigest() != ORIGINAL_MD5:
         raise BuildError("original ROM md5 mismatch")
     rom = bytearray(original) + b"\xFF" * (ROM_SIZE - len(original))
     texts, korean_ids = load_texts(original, csv_path)
     label_rows = load_labels(labels_csv)
-    gs = encode.GlyphSet(list(texts.values()) + [r["korean"] for r in label_rows])
+    roster_rows = load_ingame(roster_csv)
+    gs = encode.GlyphSet(list(texts.values()) + [r["korean"] for r in label_rows]
+                         + [r["korean"] for r in roster_rows])
     encoded = {k: gs.encode(v) for k, v in texts.items()}
     bank, table_addr = script.build_bank(original, encoded)
     widths, bitmaps = gs.bitmaps()
@@ -276,7 +308,8 @@ def build(original, csv_path=None, labels_csv=None, ingame_csv=None, teams_csv=N
         px = sum(width_of.get(c, 12) if c != " " else encode.SPACE_W for c in r["korean"])
         if px > int(r["n"]) * 8:
             log("label too wide (%dpx > %dpx): %s %s" % (px, int(r["n"]) * 8, r["id"], r["korean"]))
-    code = assemble([("SURNAME_TABLE", table_addr["surname"])])
+    code = assemble([("SURNAME_TABLE", table_addr["surname"]), ("ITEM_TABLE", table_addr["item"]),
+                     ("FULLNAME_TABLE", table_addr["fullname"])])
     ingame_rows = load_ingame(ingame_csv)
     if ingame_rows:
         block, static, pool = ingame_font(original, ingame_rows)
@@ -292,6 +325,11 @@ def build(original, csv_path=None, labels_csv=None, ingame_csv=None, teams_csv=N
             if r.get("korean"):
                 ingame.encode_record(rom, int(r["offset"], 16), r["korean"], static)
         rom[POOL8_ROM:POOL8_ROM + 2 + len(pool)] = struct.pack("<H", len(pool)) + bytes(pool)
+        rom[MPOOL_ROM:MPOOL_ROM + 2 + len(MENU_POOL)] = struct.pack("<H", len(MENU_POOL)) + bytes(MENU_POOL)
+        rom[TABLE_LIST_ROM:TABLE_LIST_ROM + 14] = struct.pack("<7H", *(table_addr[k] for k in TABLE_LIST))
+        if roster_rows:
+            tab = shift_table(roster_rows, gs)
+            rom[SHIFT_ROM:SHIFT_ROM + len(tab)] = tab
         g8 = glyph8_table(gs)
         rom[GLYPH8_ROM:GLYPH8_ROM + len(g8)] = g8
         log("in-game font: %d static syllables, %d dynamic slots" % (len(static), len(pool)))
@@ -302,6 +340,9 @@ def build(original, csv_path=None, labels_csv=None, ingame_csv=None, teams_csv=N
     rom[RESERVED_ROM:RESERVED_ROM + 64] = reserved_bitmap(original, L.extract(original), label_rows, team_tiles)
     mark_labels(rom, label_rows)
     korean_kanji16(rom)
+    slots = static8.apply(rom, load_ingame(static8_csv))
+    if slots:
+        log("static 8x8 rows: %d syllables in menu font slots" % len(slots))
     rom[SCRIPT_ROM:SCRIPT_ROM + len(bank)] = bank
     rom[CODE_ROM:CODE_ROM + len(code)] = code
     rom[WIDTHS_ROM:WIDTHS_ROM + len(widths)] = widths
@@ -321,10 +362,12 @@ def main():
     ingame_csv = os.path.join(ROOT, "translations", "ingame.csv")
     teams_csv = os.path.join(ROOT, "translations", "teams.csv")
     bg2_csv = os.path.join(ROOT, "translations", "bg2.csv")
+    roster_csv = os.path.join(ROOT, "translations", "roster.csv")
+    static8_csv = os.path.join(ROOT, "translations", "static8.csv")
     if "--csv" in sys.argv:
         csv_path = sys.argv[sys.argv.index("--csv") + 1]
     original = open(args[0], "rb").read()
-    rom, _ = build(original, csv_path, labels_csv, ingame_csv, teams_csv, bg2_csv)
+    rom, _ = build(original, csv_path, labels_csv, ingame_csv, teams_csv, bg2_csv, roster_csv, static8_csv)
     open(args[1], "wb").write(rom)
     print("wrote", args[1], len(rom), "bytes")
 

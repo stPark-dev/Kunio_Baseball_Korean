@@ -146,3 +146,37 @@ def test_bg2_apply_repoints_rows_into_freed_tiles():
     assert rom[b + 0x60 * 32:b + 0x60 * 32 + 32] == bg2.with_background(bg2.glyph_tiles("열")[0], 2)
     assert 0 not in {v for r in bg2.decode_tile(rom, b + 0x60 * 32) for v in r}
     assert pools["A"].free and pools["B"].free
+
+
+def test_roster_hooks_and_shift_table():
+    from tools.kbb import encode
+    sites = {p[0]: p for p in build.patches({"story": 0x9A22, "surname": 0x8018, "name_extra2": 0x87D5, "item": 0x8A27, "school": 0x99A2})}
+    assert sites[0x016A8B][1] == b"\xAD\x9D\x71\x0A" and sites[0x016A8B][2] == build.jml(build.ENTRY_ROSTER_NAME)
+    assert sites[0x016B2F][2] == build.jml(build.ENTRY_ROSTER_SHIFT)
+    assert sites[0x016ADD][2] == build.jml(build.ENTRY_ROSTER_ITEM)
+    assert sites[0x014300][2] == build.jml(build.ENTRY_ROSTER_W4) and sites[0x0142E4][2] == b"\xF4\xB0\x00"
+    assert sites[0x0142ED][2] == b"\xBF\x80\xBD\xB1"
+    assert sites[0x08395D][2] == build.jml(build.ENTRY_ROSTER_FULL) and sites[0x081456][2] == build.jml(build.ENTRY_ROSTER_FULL7F)
+    assert len(build.MENU_POOL) == 95 and 0x0D not in build.MENU_POOL and all(t & 0xF >= 9 for t in build.MENU_POOL)
+    rows = [{"korean": "내야"}, {"korean": "외야"}]
+    gs = encode.GlyphSet([r["korean"] for r in rows])
+    tab = build.shift_table(rows, gs)
+    p0, p1 = struct.unpack_from("<II", tab, 0)
+    assert p0 == 0xBD00 + 8 and p1 == p0 + len(gs.encode("내야"))
+    assert tab[8:8 + len(gs.encode("내야"))] == gs.encode("내야")
+
+
+def test_static8_rows_use_fixed_slots_and_original_tiles():
+    from tools.kbb import font, static8
+    rom = bytearray(font.FONT_OFFSET + font.FONT_SIZE)
+    struct.pack_into("<9H", rom, 0x100, *([0x20BA] * 9))
+    struct.pack_into("<3H", rom, 0x200, 0x204F, 0x202F, 0x209F)
+    slots = static8.apply(rom, [{"offset": "100", "n": "9", "korean": "투수(1)"},
+                                {"offset": "200", "n": "3", "korean": "수 "}])
+    words = struct.unpack_from("<9H", rom, 0x100)
+    assert words[0] == 0x2000 | slots["투"] and words[1] == 0x2000 | slots["수"]
+    assert words[2:5] == (0x2082, 0x2013, 0x2092) and words[5:] == (0x2000,) * 4
+    assert struct.unpack_from("<3H", rom, 0x200) == (0x2000 | slots["수"], 0x2000, 0x2000)
+    assert set(slots.values()) <= set(static8.SLOTS) and not (set(slots.values()) & set(build.MENU_POOL))
+    t = slots["투"]
+    assert rom[font.FONT_OFFSET + t * 16:font.FONT_OFFSET + t * 16 + 16] == static8.font8.tile8("투")

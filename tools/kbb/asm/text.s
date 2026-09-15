@@ -91,6 +91,21 @@ G_BLANK    = $7E8C1E            ; constant blank cell word ($2002): the queue DM
 GLYPH8  = $B38000               ; 16 bytes per glyph id
 POOL8   = $B1BE00               ; u16 count, then the free font slots
 D_MAP   = $7E9A80               ; glyph id held by each pool slot (u16 each)
+; roster screens ($82:EA7B surname rows, $82:EB1F defensive-shift rows): the same 8x8
+; cache idea with the menu font's kana columns as the pool
+MPOOL   = $B1BE80               ; u16 count, then the menu font slots
+M_MAP   = $7E9B20               ; glyph id per menu pool slot (u16 each, up to 96)
+M_NEXT  = GST+14
+M_BUF   = $7E9BE0               ; cell buffer (low word, bank $7E)
+M_CELLS = $7E9BE2
+SHIFT_TABLE = $B1BD00           ; 4-byte entries: low word = string address in bank $B1
+ROSTER_NAME_RTS  = $82EACC
+ROSTER_SHIFT_RTS = $82EB6F
+ROSTER_ITEM_RTS  = $82EB1E
+ROSTER_W4_EXIT   = $82C35A      ; the lineup task's row-queue code (PEA $0000 / PLB / PLP)
+ROSTER_FULL_RTS  = $90B99E
+ROSTER_FULL7F_CONT = $9094A5
+W4_ATTR_FLAG     = $7E6886      ; nonzero: palette 1 ($2400) instead of 0 ($2000)
 
 ; ---- pre-drawn labels (menus, team names): hook on the row writer $91B390 ----
 ORIG_ROW_WRITER = $11B395       ; after PHP PHB PHD REP #$30
@@ -162,6 +177,12 @@ z_i     = $32
         jml kbb_game_main       ; $B18018
         jml kbb_game_nested     ; $B1801C
         jml kbb_hud_name        ; $B18020
+        jml kbb_roster_name     ; $B18024
+        jml kbb_roster_shift    ; $B18028
+        jml kbb_roster_item     ; $B1802C
+        jml kbb_roster_w4       ; $B18030
+        jml kbb_roster_full     ; $B18034
+        jml kbb_roster_full7f   ; $B18038
 
 bit_table:
         .word $0001, $0002, $0004, $0008, $0010, $0020, $0040, $0080
@@ -1603,3 +1624,293 @@ nmi_pool_upload:
         dey
         bne @next
 @done:  rts
+
+; ---- roster screens: 8x8 names and shift words from the translated tables ------------
+; Replaces LDA $719D / ASL at $82:EA8B and $82:EB2F. DB = $7E, index in $7E:719D,
+; attribute word in $7E:719F; the original cleared the cell buffer already.
+kbb_roster_name:
+        lda #$71AF
+        sta f:M_BUF
+        lda #6
+        sta f:M_CELLS
+        lda f:$7E719D
+        asl
+        asl
+        tax
+        phb
+        pea SCRIPT_BANK*256+SCRIPT_BANK
+        plb
+        plb
+        lda a:SURNAME_TABLE,x
+        tay
+        jsr roster_cells
+        plb
+        jml ROSTER_NAME_RTS
+
+kbb_roster_shift:
+        lda #$71B3
+        sta f:M_BUF
+        lda #8
+        sta f:M_CELLS
+        lda f:$7E719D
+        asl
+        asl
+        tax
+        phb
+        pea $B1B1
+        plb
+        plb
+        lda a:.loword(SHIFT_TABLE),x
+        tay
+        jsr roster_cells
+        plb
+        jml ROSTER_SHIFT_RTS
+
+kbb_roster_item:
+        lda #$71B3
+        sta f:M_BUF
+        lda #8
+        sta f:M_CELLS
+        lda f:$7E719D
+        asl
+        asl
+        tax
+        phb
+        pea SCRIPT_BANK*256+SCRIPT_BANK
+        plb
+        plb
+        lda a:ITEM_TABLE,x
+        tay
+        jsr roster_cells
+        plb
+        jml ROSTER_ITEM_RTS
+
+kbb_roster_full:
+        lda #$71BF
+        sta f:M_BUF
+        lda #28
+        sta f:M_CELLS
+        lda f:$7E719D
+        asl
+        asl
+        tax
+        phb
+        pea SCRIPT_BANK*256+SCRIPT_BANK
+        plb
+        plb
+        lda a:FULLNAME_TABLE,x
+        tay
+        jsr roster_cells
+        plb
+        jml ROSTER_FULL_RTS
+
+; Lineup task ($82:C2C5): DP = task frame, DB already the script bank, $32 = string,
+; cells at DP $24 (7 max), attribute by W4_ATTR_FLAG. Replaces the loop at $82:C300.
+kbb_roster_w4:
+        ldy $32
+        ldx #0
+@ch:    lda $0000,y
+        and #$00FF
+        beq @done
+        cmp #$0002
+        beq @space
+        cmp #$00A0
+        bcs @skip
+        cmp #$0003
+        bcc @skip1
+        phx
+        jsr get_index
+        phy
+        jsr m_get
+        ply
+        plx
+        pha
+        lda f:W4_ATTR_FLAG
+        bne @pal1
+        pla
+        ora #$2000
+        bra @put
+@pal1:  pla
+        ora #$2400
+@put:   sta $24,x
+        inx
+        inx
+        bra @more
+@space: iny
+        inx
+        inx
+@more:  cpx #14
+        bcc @ch
+@done:  jml ROSTER_W4_EXIT
+@skip:  iny
+@skip1: iny
+        bra @ch
+
+; Player list in the $7F:A000 screen shadow ($90:9456): X = index * 4, Y = cell offset,
+; DB = $7F. Continues at the original's end-of-string code.
+kbb_roster_full7f:
+        phb
+        pea SCRIPT_BANK*256+SCRIPT_BANK
+        plb
+        plb
+        lda a:FULLNAME_TABLE,x
+        pha
+        tya
+        sta f:M_BUF
+        ply
+        ldx #0
+@ch:    lda $0000,y
+        and #$00FF
+        beq @done
+        cmp #$0002
+        beq @space
+        cmp #$00A0
+        bcs @skip
+        cmp #$0003
+        bcc @skip1
+        phx
+        jsr get_index
+        phy
+        jsr m_get
+        ply
+        plx
+        ora #$2000
+        bra @put
+@space: iny
+        lda #$2002
+@put:   pha
+        txa
+        clc
+        adc f:M_BUF
+        tax
+        pla
+        sta f:$7F0000,x
+        txa
+        sec
+        sbc f:M_BUF
+        inc
+        inc
+        tax
+        bra @ch
+@done:  plb
+        jml ROSTER_FULL7F_CONT
+@skip:  iny
+@skip1: iny
+        bra @ch
+
+; Y = string in DB. Fills up to M_CELLS cells at $7E:M_BUF.
+roster_cells:
+        ldx #0
+@ch:    lda $0000,y
+        and #$00FF
+        beq @done
+        cmp #$0002
+        beq @space
+        cmp #$00A0
+        bcs @skip               ; newline / variable: not expected in names
+        cmp #$0003
+        bcc @skip1
+        phx
+        jsr get_index
+        phy
+        jsr m_get
+        ply
+        plx
+        ora f:$7E719F
+        jsr roster_put
+        bra @more
+@space: iny
+        lda #$2002
+        jsr roster_put
+@more:  txa
+        lsr
+        cmp f:M_CELLS
+        bcc @ch
+@done:  rts
+@skip:  iny
+@skip1: iny
+        bra @ch
+
+; A = cell word, X = byte offset in the buffer -> stored; X += 2
+roster_put:
+        pha
+        txa
+        clc
+        adc f:M_BUF
+        tax
+        pla
+        sta f:$7E0000,x
+        txa
+        sec
+        sbc f:M_BUF
+        inc
+        inc
+        tax
+        rts
+
+; A = glyph id -> A = menu font tile (kana column slot); like d_get with its own map.
+m_get:
+        sta f:D_ID
+        lda #0
+        sta f:D_TMP
+@scan:  lda f:D_TMP
+        cmp f:MPOOL
+        bcs @miss
+        asl
+        tax
+        lda f:M_MAP,x
+        cmp f:D_ID
+        beq @hit
+        lda f:D_TMP
+        inc
+        sta f:D_TMP
+        bra @scan
+@hit:   lda f:D_TMP
+        tax
+        lda f:MPOOL+2,x
+        and #$00FF
+        sta f:D_TMP
+        bra @send
+@miss:  lda f:M_NEXT
+        cmp f:MPOOL
+        bcc @slot
+        lda #0
+@slot:  sta f:D_TMP
+        inc
+        sta f:M_NEXT
+        lda f:D_TMP
+        asl
+        tax
+        lda f:D_ID
+        sta f:M_MAP,x
+        lda f:D_TMP
+        tax
+        lda f:MPOOL+2,x
+        and #$00FF
+        sta f:D_TMP
+@send:  lda f:BG34NBA_SHADOW
+        and #$0007
+        xba
+        asl
+        asl
+        asl
+        asl
+        sta f:z_val+Z+$7E0000
+        lda f:D_TMP
+        asl
+        asl
+        asl
+        clc
+        adc f:z_val+Z+$7E0000
+        sta f:z_val+Z+$7E0000
+        lda f:D_ID
+        asl
+        asl
+        asl
+        asl
+        clc
+        adc #.loword(GLYPH8)
+        sta f:z_dst+Z+$7E0000
+        jsr ring_push_rom
+        lda f:D_TMP
+        rts
