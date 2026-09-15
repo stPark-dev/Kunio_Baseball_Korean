@@ -205,3 +205,31 @@ def test_kanji16_two_syllable_glyph():
     rows = font.glyph16(rom, kanji16.KANJI16.index("選"))
     assert any(3 in r[:8] for r in rows) and any(3 in r[8:] for r in rows)   # 선 | 수 side by side
     assert all(rows[2 * y] == rows[2 * y + 1] for y in range(8))            # stretched 2x vertically
+
+
+def test_sprtext_table_and_codec():
+    from tools.kbb import sprtext
+    rows = [[(x * y) % 16 for x in range(8)] for y in range(8)]
+    assert sprtext.decode4(sprtext.encode4(rows)) == rows
+    sig = bytes(range(32))
+    row = {"korean": "열", "tl": sig.hex(), "tr": "00" * 32, "bl": sig.hex(), "br": (b"\x01" * 32).hex()}
+    tab = sprtext.build_table([row])
+    assert struct.unpack_from("<H", tab, 0)[0] == 3                # the all-zero quadrant is skipped
+    assert tab[2:34] == sig
+    rep = sprtext.decode4(tab[34:66])
+    assert {v for r in rep for v in r} <= {sprtext.BG, sprtext.INK} and any(sprtext.INK in r for r in rep)
+    sites = {p[0]: p for p in build.patches({"story": 0x9A22, "surname": 0x8018, "name_extra2": 0x87D5, "item": 0x8A27, "school": 0x99A2})}
+    assert sites[build.SHEET_HOOK_ROM][2] == build.jml(build.ENTRY_SHEET)
+
+
+def test_titlecard_draws_into_listed_tiles_only():
+    from tools.kbb import sprtext, titlecard
+    rom = bytearray(titlecard.TILESET_ROM + 0x4000)
+    rows = [{"id": "t", "korean": "편", "top": "36a - 36c", "bottom": "37a 37b 37c"}]
+    assert titlecard.apply(rom, rows) == 1
+    def tile(t):
+        off = titlecard.TILESET_ROM + (t - titlecard.FIRST_TILE) * 32
+        return sprtext.decode4(rom[off:off + 32])
+    assert all(v == 0 for r in tile(0x36b) for v in r)                       # '-' column untouched
+    drawn = [v for t in (0x36a, 0x36c, 0x37a, 0x37b, 0x37c) for r in tile(t) for v in r]
+    assert set(drawn) <= {titlecard.INK, titlecard.BG} and titlecard.INK in drawn

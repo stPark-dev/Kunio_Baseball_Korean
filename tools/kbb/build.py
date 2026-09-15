@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 
-from tools.kbb import bg2, encode, font8, glyphs, grid, ingame, rows8, script, static8, text
+from tools.kbb import bg2, encode, font8, glyphs, grid, ingame, rows8, script, sprtext, static8, text, titlecard
 from tools.kbb import labels as L
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -23,8 +23,8 @@ ORIGINAL_MD5 = "42e27da8a2b91eca749d9700ebccd865"
 ROM_SIZE = 0x200000
 SCRIPT_ROM = 0x180000
 CODE_ROM = 0x188000
-WIDTHS_ROM = CODE_ROM + 0x1000
-WIDTHS_LIMIT = 0x3000
+WIDTHS_ROM = CODE_ROM + 0x1800
+WIDTHS_LIMIT = 0x800
 GLYPH_ROM = 0x190000
 GLYPHS_PER_BANK = 0x400
 GLYPH8_ROM = 0x198000                        # $B3:8000, 16 bytes per glyph id (8x8 Korean)
@@ -39,6 +39,9 @@ TABLE_LIST_ROM = CODE_ROM + 0x3D80           # $B1:BD80: the lineup task's 7 tab
 ROWS8_ROM = CODE_ROM + 0x2000                # $B1:A000: queue-hook row table + strings (up to $B1:BCFF)
 ROWS8_LIMIT = 0x1D00
 QUEUE_ROM = 0x0070FD                         # $80:F0FD, the VRAM queue routine
+SPRTEXT_ROM = 0x1A0000                       # $B4:8000: location-title tile signatures and Korean tiles
+SHEET_HOOK_ROM = 0x00858A                    # $81:858A, LDA $22 / BEQ before the $7F-sheet DMA
+SHEET2_HOOK_ROM = 0x0092FE                   # $81:92FE, the scene script's cmd 1C VRAM upload
 TABLE_LIST = ("surname", "name_extra1", "name_extra2", "name_set3", "name_set4", "name_set5", "item")
 MENU_POOL = [t for t in range(256) if t & 0xF in (0x9, 0xA, 0xB, 0xD, 0xE, 0xF) and t != 0x0D]
 ASM_SOURCE = os.path.join(ROOT, "tools", "kbb", "asm", "text.s")
@@ -49,7 +52,7 @@ CODE_ENTRY = 0xB18000
 (ENTRY_START, ENTRY_MAIN, ENTRY_NESTED, ENTRY_NMI, ENTRY_LABEL,
  ENTRY_GAME_START, ENTRY_GAME_MAIN, ENTRY_GAME_NESTED, ENTRY_HUD_NAME,
  ENTRY_ROSTER_NAME, ENTRY_ROSTER_SHIFT, ENTRY_ROSTER_ITEM, ENTRY_ROSTER_W4,
- ENTRY_ROSTER_FULL, ENTRY_ROSTER_FULL7F, ENTRY_QUEUE) = (CODE_ENTRY + 4 * k for k in range(16))
+ ENTRY_ROSTER_FULL, ENTRY_ROSTER_FULL7F, ENTRY_QUEUE, ENTRY_SHEET, ENTRY_SHEET2) = (CODE_ENTRY + 4 * k for k in range(18))
 GAME_PX = 176          # in-game commentary window: 22 columns
 # The in-game hooks work in isolation but every byte of VRAM is in use during a match
 # (BG1 has a 64x64 tilemap at $E000-$FFFF), so there is no room for the glyph cache yet.
@@ -122,6 +125,8 @@ def patches(table_addr, game_text=GAME_TEXT):
         (0x08395D, b"\xAD\x9D\x71\x0A", jml(ENTRY_ROSTER_FULL)),     # $90:B95D full-name rows
         (0x081456, b"\xBF\xD3\x8B\x86", jml(ENTRY_ROSTER_FULL7F)),   # $90:9456 player list in the $7F shadow
         (QUEUE_ROM, b"\x08\x8B\xF4\x7E\x00", jml(ENTRY_QUEUE) + b"\xEA"),   # VRAM queue: translated ROM rows
+        (SHEET_HOOK_ROM, b"\xA5\x22\xF0\x27", jml(ENTRY_SHEET)),           # decompressed sheet -> Korean titles
+        (SHEET2_HOOK_ROM, b"\x08\x8B\x4B\xAB", jml(ENTRY_SHEET2)),         # cmd 1C uploads from $7F buffers
     ]
     return base + (game if game_text else [])
 
@@ -288,7 +293,7 @@ def shift_table(rows, gs):
 
 
 def build(original, csv_path=None, labels_csv=None, ingame_csv=None, teams_csv=None, bg2_csv=None,
-          roster_csv=None, static8_csv=None, rows8_csv=None, log=print):
+          roster_csv=None, static8_csv=None, rows8_csv=None, sprtext_csv=None, titles_csv=None, log=print):
     if hashlib.md5(original).hexdigest() != ORIGINAL_MD5:
         raise BuildError("original ROM md5 mismatch")
     rom = bytearray(original) + b"\xFF" * (ROM_SIZE - len(original))
@@ -360,6 +365,9 @@ def build(original, csv_path=None, labels_csv=None, ingame_csv=None, teams_csv=N
     rom[RESERVED_ROM:RESERVED_ROM + 64] = reserved_bitmap(original, L.extract(original), label_rows, team_tiles)
     mark_labels(rom, label_rows)
     korean_kanji16(rom)
+    spr = sprtext.build_table(load_ingame(sprtext_csv))
+    rom[SPRTEXT_ROM:SPRTEXT_ROM + len(spr)] = spr
+    titlecard.apply(rom, load_ingame(titles_csv))
     slots = static8.apply(rom, load_ingame(static8_csv))
     if slots:
         log("static 8x8 rows: %d syllables in menu font slots" % len(slots))
@@ -385,10 +393,12 @@ def main():
     roster_csv = os.path.join(ROOT, "translations", "roster.csv")
     static8_csv = os.path.join(ROOT, "translations", "static8.csv")
     rows8_csv = os.path.join(ROOT, "translations", "rows8.csv")
+    sprtext_csv = os.path.join(ROOT, "translations", "sprtext.csv")
+    titles_csv = os.path.join(ROOT, "translations", "titles.csv")
     if "--csv" in sys.argv:
         csv_path = sys.argv[sys.argv.index("--csv") + 1]
     original = open(args[0], "rb").read()
-    rom, _ = build(original, csv_path, labels_csv, ingame_csv, teams_csv, bg2_csv, roster_csv, static8_csv, rows8_csv)
+    rom, _ = build(original, csv_path, labels_csv, ingame_csv, teams_csv, bg2_csv, roster_csv, static8_csv, rows8_csv, sprtext_csv, titles_csv)
     open(args[1], "wb").write(rom)
     print("wrote", args[1], len(rom), "bytes")
 

@@ -13,7 +13,7 @@
 .smart +
 
 SCRIPT_BANK     = $B0
-WIDTHS          = $B19000       ; 1 byte per glyph index
+WIDTHS          = $B19800       ; 1 byte per glyph index
 GLYPH_BANK0     = $B2           ; 1024 glyphs (32 bytes each) per bank
 
 ORIG_WAIT       = $10EA25       ; per-character delay, then falls into the loop head
@@ -113,6 +113,18 @@ Q_ATTR  = $7E9BF2
 Q_BUF   = $7E9BF4
 Q_CELLS = $7E9BF6
 QUEUE_CONT = $80F102            ; after the replaced PHP / PHB / PEA $007E
+; decompressed-sheet hook ($81:858A): DP $20 = source in bank $7F, $22 = bytes, $18 = VRAM word
+SPRTEXT = $B48000               ; u16 count, entries of (32-byte signature, 32-byte Korean tile)
+S_TILE  = $7E9BF8
+S_ENT   = $7E9BFA
+S_CNT   = $7E9BFC
+S_END   = $7E9BFE
+S_CALLS = $7E8C20               ; debug: cmd 1C upload calls seen
+S_LASTBANK = $7E8C22
+S_LASTSRC  = $7E8C24
+SHEET_SKIP = $8185B5            ; PLP / RTS (byte count zero)
+SHEET_CONT = $81858E            ; STZ $420C ... the DMA itself
+SHEET2_CONT = $819302           ; after PHP PHB PHK PLB of the cmd 1C upload routine
 ROSTER_NAME_RTS  = $82EACC
 ROSTER_SHIFT_RTS = $82EB6F
 ROSTER_ITEM_RTS  = $82EB1E
@@ -198,6 +210,8 @@ z_i     = $32
         jml kbb_roster_full     ; $B18034
         jml kbb_roster_full7f   ; $B18038
         jml kbb_queue           ; $B1803C
+        jml kbb_sheet           ; $B18040
+        jml kbb_sheet2          ; $B18044
 
 bit_table:
         .word $0001, $0002, $0004, $0008, $0010, $0020, $0040, $0080
@@ -2095,3 +2109,144 @@ q_store:
         inc
         tax
         rts
+
+; ---- decompressed sheet hook: replaces LDA $22 / BEQ at $81:858A ----------------------
+; Every 32-byte tile of the buffer that equals a signature in SPRTEXT is overwritten with
+; its Korean tile before the game DMAs the sheet to VRAM.
+kbb_sheet:
+        php
+        rep #$30
+        lda $22
+        bne @go
+        jmp @skip
+@go:    clc
+        adc $20
+        sec
+        sbc #32                 ; last tile start (a $B000 + $5000 sheet ends exactly at $10000)
+        sta f:S_END
+        lda $20
+        sta f:S_TILE
+        phb
+        pea $B4B4
+        plb
+        plb
+        jsr sheet_scan
+        plb
+        plp
+        lda $22
+        jml SHEET_CONT
+@skip:  plp
+        lda $22
+        jml SHEET_SKIP
+
+; ---- cmd 1C uploads ($81:92FE, source pushed by the caller): same patching --------------
+; Entry stack: RTL(3), src low, src high, src bank. X = VRAM word, Y = byte count.
+kbb_sheet2:
+        php
+        rep #$30
+        phx
+        phy
+        lda f:S_CALLS
+        inc
+        sta f:S_CALLS
+        lda 11,s                ; source bank (low byte)
+        and #$00FF
+        sta f:S_LASTBANK
+        lda 9,s
+        sta f:S_LASTSRC
+        lda 11,s
+        and #$00FF
+        cmp #$007F
+        bne @pass
+        lda 9,s                 ; source address
+        sta f:S_TILE
+        tya
+        clc
+        adc f:S_TILE
+        sec
+        sbc #32
+        sta f:S_END
+        phb
+        pea $B4B4
+        plb
+        plb
+        jsr sheet_scan
+        plb
+@pass:  ply
+        plx
+        plp
+        php                     ; the replaced PHP / PHB / PHK / PLB
+        phb
+        pea $8181
+        plb
+        plb
+        jml SHEET2_CONT
+
+; DB = $B4. Replace every tile in [S_TILE, S_END) of bank $7F that matches a signature.
+sheet_scan:
+@tile:  lda f:S_TILE
+        cmp f:S_END
+        beq @go
+        bcs @done
+@go:
+        lda f:SPRTEXT
+        sta f:S_CNT
+        ldy #2
+@ent:   lda f:S_CNT
+        beq @next_tile
+        dec
+        sta f:S_CNT
+        tya
+        sta f:S_ENT
+        lda f:S_TILE
+        tax
+        lda f:$7F0000,x
+        cmp a:.loword(SPRTEXT),y
+        bne @nomatch
+        inx
+        inx
+        iny
+        iny
+        lda #15
+@cmp:   pha
+        lda f:$7F0000,x
+        cmp a:.loword(SPRTEXT),y
+        bne @cmp_fail
+        inx
+        inx
+        iny
+        iny
+        pla
+        dec
+        bne @cmp
+        lda f:S_TILE
+        tax
+        lda #16
+@cp:    pha
+        lda a:.loword(SPRTEXT),y
+        sta f:$7F0000,x
+        inx
+        inx
+        iny
+        iny
+        pla
+        dec
+        bne @cp
+        bra @next_tile
+@cmp_fail:
+        pla
+@nomatch:
+        lda f:S_ENT
+        clc
+        adc #64
+        tay
+        bra @ent
+@next_tile:
+        lda f:S_TILE
+        cmp f:S_END             ; the last tile may end exactly at $10000
+        beq @done
+        clc
+        adc #32
+        sta f:S_TILE
+        jmp @tile
+@done:  rts
