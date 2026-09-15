@@ -132,6 +132,13 @@ class Emulator:
         size = self.core.retro_get_memory_size(kind)
         return C.string_at(ptr, size) if ptr and size else b""
 
+    def poke(self, kind, offset, data):
+        """Write bytes into a core memory region (e.g. WRAM) at `offset`."""
+        self.core.retro_get_memory_data.restype = C.c_void_p
+        ptr = self.core.retro_get_memory_data(kind)
+        if ptr:
+            C.memmove(ptr + offset, data, len(data))
+
     def state(self):
         """Serialized core state (contains CGRAM, OAM and PPU registers)."""
         self.core.retro_serialize_size.restype = C.c_size_t
@@ -169,6 +176,15 @@ def parse_events(presses, holds):
     return lambda frame: active.get(frame, 0)
 
 
+def parse_pokes(specs):
+    """["FRAME:HEXOFFSET:HEXBYTES", ...] -> {frame: [(offset, bytes)]}"""
+    pokes = {}
+    for spec in specs:
+        frame, off, data = spec.split(":")
+        pokes.setdefault(int(frame), []).append((int(off, 16), bytes.fromhex(data)))
+    return pokes
+
+
 def parse_shots(specs):
     """["FRAME:path", ...] -> {frame: path}"""
     shots = {}
@@ -190,11 +206,15 @@ def main():
     ap.add_argument("--dump-ram", help="write WRAM at the last frame to this file")
     ap.add_argument("--dump-vram", help="write VRAM at the last frame to this file")
     ap.add_argument("--dump-state", help="write the serialized core state at the last frame")
+    ap.add_argument("--poke", action="append", default=[], help="FRAME:WRAMOFFSET_HEX:BYTES_HEX (little-endian as given)")
     args = ap.parse_args()
     shots = parse_shots(args.shot)
+    pokes = parse_pokes(args.poke)
     emu = Emulator(args.core, args.rom, os.path.dirname(os.path.abspath(args.rom)))
     script = parse_events(args.press, args.hold)
     for frame in emu.run(args.frames, script):
+        for off, data in pokes.get(frame, []):
+            emu.poke(Emulator.MEMORY_SYSTEM_RAM, off, data)
         if frame in shots and emu.frame is not None:
             img = emu.frame
             if args.scale > 1:

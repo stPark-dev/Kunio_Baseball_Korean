@@ -18,3 +18,8 @@ def test_hold_range_is_inclusive_and_combines_with_press():
 
 def test_parse_shots_keeps_colons_in_path():
     assert parse_shots(["30:out/a:b.png"]) == {30: "out/a:b.png"}
+
+
+def test_parse_pokes():
+    from tools.emu.harness import parse_pokes
+    assert parse_pokes(["100:68F5:B700"]) == {100: [(0x68F5, b"\xb7\x00")]}

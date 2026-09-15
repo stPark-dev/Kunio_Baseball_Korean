@@ -32,7 +32,13 @@ ASM_CONFIG = os.path.join(ROOT, "tools", "kbb", "asm", "bank.cfg")
 CC65_BIN = os.environ.get("CC65_BIN", "")
 
 CODE_ENTRY = 0xB18000
-ENTRY_START, ENTRY_MAIN, ENTRY_NESTED, ENTRY_NMI, ENTRY_LABEL = (CODE_ENTRY + 4 * k for k in range(5))
+(ENTRY_START, ENTRY_MAIN, ENTRY_NESTED, ENTRY_NMI, ENTRY_LABEL,
+ ENTRY_GAME_START, ENTRY_GAME_MAIN, ENTRY_GAME_NESTED) = (CODE_ENTRY + 4 * k for k in range(8))
+GAME_PX = 176          # in-game commentary window: 22 columns
+# The in-game hooks work in isolation but every byte of VRAM is in use during a match
+# (BG1 has a 64x64 tilemap at $E000-$FFFF), so there is no room for the glyph cache yet.
+# Keep the original Japanese commentary until an in-game font plan exists (see README).
+GAME_TEXT = False
 LABEL_TABLE_ROM = CODE_ROM + 0x4000          # $B1:C000, u16 string offsets then strings
 RESERVED_ROM = CODE_ROM + 0x3F00             # $B1:BF00, 64-byte bitmap of kanji tiles to keep
 # 16x16 glyphs drawn by screens whose data is not located yet (versus title, pre-game menu)
@@ -55,11 +61,11 @@ def jml(addr):
     return bytes([0x5C, addr & 0xFF, (addr >> 8) & 0xFF, addr >> 16])
 
 
-def patches(table_addr):
+def patches(table_addr, game_text=GAME_TEXT):
     """[(rom offset, original bytes, new bytes)]"""
     def lo16(v):
         return struct.pack("<H", v)
-    return [
+    base = [
         (0x0869FA, b"\xA9\x86", b"\xA9\xB0"),                                      # data bank -> script bank
         (0x086A05, b"\xB9\x22\x9A", b"\xB9" + lo16(table_addr["story"])),         # story pointer table
         (0x086AFC, b"\xA9\x18\x80", b"\xA9" + lo16(table_addr["surname"])),       # var 42: surname
@@ -72,6 +78,25 @@ def patches(table_addr):
         (0x007F0C, b"\xB1\xF6\x80", struct.pack("<I", ENTRY_NMI)[:3]),            # NMI vector
         (ROW_WRITER_ROM, b"\x08\x8B\x0B\xC2\x30", jml(ENTRY_LABEL) + b"\xEA"),     # label row writer
     ]
+    game = [
+        # in-game commentary renderer (bank $04): script bank + hooks
+        (0x024AF4, b"\xA9\x86\x86", b"\xA9\xB0\xB0"),
+        (0x024B04, b"\xAF\x0E\x80\x86", b"\xAF\x0E\x80\xB0"),
+        (0x024B21, b"\xAF\x0E\x80\x86", b"\xAF\x0E\x80\xB0"),
+        (0x024B34, b"\xAA\x82\xFF\x00", jml(ENTRY_GAME_START)),
+        (0x024B4A, b"\xAF\x36\x69\x7E", jml(ENTRY_GAME_NESTED)),
+        (0x024BD2, b"\xA9\x86\x86", b"\xA9\xB0\xB0"),
+        (0x024C37, b"\xAF\x33\x69\x7E", jml(ENTRY_GAME_MAIN)),
+        (0x024C7A, b"\xAF\x10\x80\x86", b"\xAF\x10\x80\xB0"),
+        (0x024C81, b"\xA9\x86\x86", b"\xA9\xB0\xB0"),
+        (0x024CAC, b"\x6F\x00\x80\x86", b"\x6F\x00\x80\xB0"),
+        (0x024CCB, b"\x6F\x16\x80\x86", b"\x6F\x16\x80\xB0"),
+        (0x024CEA, b"\x6F\x0C\x80\x86", b"\x6F\x0C\x80\xB0"),
+        (0x024DA4, b"\xAF\x36\x69\x7E", jml(ENTRY_GAME_NESTED)),
+        (0x024E2C, b"\xA9\x86\x86", b"\xA9\xB0\xB0"),
+        (0x024F09, b"\xA9\x86\x86", b"\xA9\xB0\xB0"),
+    ]
+    return base + (game if game_text else [])
 
 
 def apply_patches(rom, plist):
@@ -187,6 +212,10 @@ def build(original, csv_path=None, labels_csv=None, log=print):
     for sid, lines in encode.check({k: v for k, v in translated.items() if k.startswith("story_")},
                                    width_of, max_px=MENU_PX):
         log("note (>2 lines in the %dpx menu window): %s" % (MENU_PX, sid))
+    game_ids = {"story_%03d" % k for k in list(range(130, 334)) + list(range(687, 694))}
+    for sid, lines in encode.check({k: v for k, v in translated.items() if k in game_ids},
+                                   width_of, max_px=GAME_PX):
+        log("overflow (>2 lines in the %dpx game window): %s -> %s" % (GAME_PX, sid, [l for l, _ in lines]))
     if gs.missing:
         log("glyphs missing from the font, drawn as '?': %s" % "".join(sorted(gs.missing)))
     if len(widths) > WIDTHS_LIMIT:

@@ -37,7 +37,7 @@ T_WIN   = $10                   ; window handle
 T_NPTR  = $12                   ; nested string pointer
 
 ; renderer state (bank $7E, absolute long)
-ST      = $7E1880
+ST      = $7E1480
 PEN_X   = ST+0                  ; pixel position from the first column
 LINE    = ST+2                  ; 0 or 1
 XCOL0   = ST+4
@@ -49,15 +49,32 @@ NCOLS   = ST+14
 C_COL   = ST+16
 C_ROW   = ST+18
 RANGE   = ST+20                 ; low byte: first dirty column, high byte: last
+N_TMP   = ST+22                 ; NMI-only scratch
 FLAG_MAGIC = $A55A
 RANGE_EMPTY = $00FF
 
-BUF       = $7E8100
+BUF       = $7E9000             ; WRAM $7E:9000-$9BFF has no references in the game code
 BUF_COLS  = 33                  ; 31 visible + 2 spare for the last glyph
 BUF_SIZE  = BUF_COLS*64
 SPACE_W   = 6
 MAX_LINES = 2
 OVERFLOW_X = $4000              ; pen position that suppresses further drawing
+
+; ---- in-game commentary window (bank $04 renderer) ---------------------------
+GAME_MAIN_CONT  = $04CC44       ; message finished
+GAME_VAR        = $04CC90       ; F0 xx handler (nested strings / numbers)
+GAME_NEST_END   = $04CC24       ; nested string finished
+GAME_WAIT       = $04CF59       ; one frame per character, back to the task loop
+GAME_MAIN_HEAD  = $04CC37
+VRAM_QUEUE      = $80F0FD       ; X=source ($7E), Y=VRAM word, A=bytes; carry set = queue full
+TASK_WAIT       = $80EC8A
+G_PTR           = $7E6933       ; main string pointer (script bank)
+G_NPTR          = $7E6936       ; nested string pointer
+G_CELL          = $7E691D       ; VRAM word address of the next cell
+GST     = $7E14E0
+G_BASE  = GST+0                 ; VRAM word address of the first cell of line 0
+MODE    = GST+2                 ; 0 = dialogue window, 1 = in-game commentary
+GAME_COLS = 22
 
 ; ---- pre-drawn labels (menus, team names): hook on the row writer $91B390 ----
 ORIG_ROW_WRITER = $11B395       ; after PHP PHB PHD REP #$30
@@ -68,31 +85,29 @@ ROW_DIRTY_SET   = $91AD72
 LABEL_TABLE     = $B1C000       ; u16 string address per label id (strings follow, bank $B1)
 LABEL_MARK      = $C000         ; word 0 of a translated row: %11tt iiii iiii iiii (t=0 top, 1 bottom)
 RESERVED        = $B1BF00       ; 512-bit map of kanji-area tiles still used by untranslated labels
-KANJI_FONT      = $96D7E5       ; original 16x16 font tiles (0x100-0x2FF), 8 KB
-POOL_IMG        = $7E9000       ; WRAM mirror of the tile pool (up to 512 tiles)
 POOL_TILES      = 512
-LMAP            = $7EB000       ; cache map: 64 entries of (id, columns, unused) = 6 bytes
-LMAP_ENTRIES    = 64
-LTILES          = $7EB200       ; per map entry: 66 tile numbers (top row cells, then bottom row)
-LTILES_STRIDE   = 132
-STAGE           = $7ED400       ; render staging: up to 33 columns x 2 tile rows
-LST             = $7E18C0       ; label state
+LMAP            = $7EA400       ; cache map: 36 entries of (id, columns, unused) = 6 bytes
+LMAP_ENTRIES    = 36
+LTILES          = $7EA500       ; per map entry: 66 tile numbers (top row cells, then bottom row)
+LTILES_STRIDE   = 132           ; ends at $7EB767
+STAGE           = $7E8800       ; render staging: up to 33 columns x 2 tile rows ($8800-$8C1F)
+RING            = $7E9840       ; pending tile uploads: 32 entries of (VRAM word address, 16 bytes)
+RING_ENTRY      = 18
+RING_ENTRIES    = 32
+RING_BYTES      = RING_ENTRY*RING_ENTRIES
+RING_DRAIN      = 24            ; tiles uploaded per NMI
+LST             = $7E14C0       ; label state
 L_BASE    = LST+0               ; BG3 name base nibble the pool was set up for
 L_POOL0   = LST+2               ; first pool tile number
 L_POOLN   = LST+4               ; pool size in tiles
 L_NEXT    = LST+6               ; next free tile (relative to pool start)
-L_LO      = LST+8               ; dirty tile range in the pool image (inclusive)
-L_HI      = LST+10
-L_BUSY    = LST+12              ; main thread is updating the range
+R_HEAD    = LST+8               ; ring read offset (NMI)
+R_TAIL    = LST+10              ; ring write offset (main thread)
 L_MAPN    = LST+14              ; entries used in the cache map
 L_VRAMW   = LST+16              ; VRAM word address of pool tile 0
-L_CUR     = LST+18              ; refresh cursor: the allocated pool is re-sent 1 KB per frame so
-                                ; that a scene reloading the font block does not leave stale tiles
-UPLOAD_CHUNK = 128              ; tiles per NMI for fresh labels (2 KB)
-REFRESH_CHUNK = 64              ; tiles per NMI for the background refresh (1 KB)
 
 ; scratch direct page used while drawing a glyph
-Z       = $1800
+Z       = $1400
 z_idx   = $00
 z_w     = $02
 z_ptr   = $04
@@ -127,6 +142,9 @@ z_i     = $32
         jml kbb_nested_loop     ; $B18008
         jml kbb_nmi             ; $B1800C
         jml kbb_label_row       ; $B18010
+        jml kbb_game_start      ; $B18014
+        jml kbb_game_main       ; $B18018
+        jml kbb_game_nested     ; $B1801C
 
 bit_table:
         .word $0001, $0002, $0004, $0008, $0010, $0020, $0040, $0080
@@ -143,6 +161,7 @@ kbb_start:
         lda #0
         sta f:PEN_X
         sta f:LINE
+        sta f:MODE
         ; columns available up to the right screen edge, at most 31
         lda #32
         sec
@@ -156,36 +175,7 @@ kbb_start:
         asl
         asl
         sta f:MAX_PX
-        ; cache location from the BG3 name base
-        lda f:BG34NBA_SHADOW
-        and #$0007
-        asl
-        tax
-        lda f:cache_table,x
-        sta f:CTILE
-        lda f:BG34NBA_SHADOW
-        and #$0007
-        xba                     ; nibble << 8
-        asl
-        asl
-        asl
-        asl                     ; nibble << 12 = word address of the name base
-        sta f:VRAMW
-        lda f:CTILE
-        asl
-        asl
-        asl                     ; tile * 8 words
-        clc
-        adc f:VRAMW
-        sta f:VRAMW
-        ; clear the tile buffer
-        ldx #0
-        lda #0
-@clr:   sta f:BUF,x
-        inx
-        inx
-        cpx #BUF_SIZE
-        bne @clr
+        jsr cache_setup
         ; fill the window tilemap with cache tile numbers
         lda #0
         sta f:C_COL
@@ -227,6 +217,38 @@ kbb_start:
         lda #FLAG_MAGIC
         sta f:FLAG
         jml ORIG_WAIT
+
+; Cache location from the BG3 name base, then clear the tile buffer.
+cache_setup:
+        lda f:BG34NBA_SHADOW
+        and #$0007
+        asl
+        tax
+        lda f:cache_table,x
+        sta f:CTILE
+        lda f:BG34NBA_SHADOW
+        and #$0007
+        xba                     ; nibble << 8
+        asl
+        asl
+        asl
+        asl                     ; nibble << 12 = word address of the name base
+        sta f:VRAMW
+        lda f:CTILE
+        asl
+        asl
+        asl                     ; tile * 8 words
+        clc
+        adc f:VRAMW
+        sta f:VRAMW
+        ldx #0
+        lda #0
+@clr:   sta f:BUF,x
+        inx
+        inx
+        cpx #BUF_SIZE
+        bne @clr
+        rts
 
 ; ---- main string loop (replaces the loop head at $10:EA2B) -------------------
 kbb_main_loop:
@@ -384,18 +406,22 @@ do_newline:
         bcs @overflow
         inc
         sta f:LINE
+        lda f:MODE
+        bne @nl_ok
         lda T_Y
         inc
         inc
         sta T_Y
-        lda #0
+@nl_ok: lda #0
         bra @set
 @overflow:
         lda #OVERFLOW_X         ; no room left: drop the rest of the message
 @set:   sta f:PEN_X
+        lda f:MODE
+        bne @done
         lda f:XCOL0
         sta T_X
-        rts
+@done:  rts
 
 ; Y = address of the word after the space. Wraps if the word does not fit.
 do_space:
@@ -684,7 +710,6 @@ kbb_label_row:
 ; DP = Z. Draws label z_id (top or bottom row per z_tpl bit 12) at z_x/z_y, z_n cells.
 label_body:
         jsr pool_setup
-        ; cache lookup
         lda f:L_MAPN
         sta z_tmp
         ldx #0
@@ -702,11 +727,10 @@ label_body:
         sta z_cols
         txa
         jsr entry_offset
-        jsr redirty_entry
+        jsr label_paint         ; the scene may have reloaded the font block: send again
         bra @write
 @miss:  jsr label_render
 @write:
-        ; window cells: tile numbers from the entry's list, bottom row uses the second half
         ldx z_x
         ldy z_y
         jsl ROW_OFFSET
@@ -748,30 +772,6 @@ label_body:
         jsl ROW_DIRTY_SET
         rts
 
-; Mark every tile of the entry at z_ent (2 * z_cols tiles) dirty again.
-redirty_entry:
-        lda #1
-        sta f:L_BUSY
-        lda z_cols
-        asl
-        sta z_tmp
-        ldx z_ent
-@t:     lda f:LTILES,x
-        cmp f:L_LO
-        bcs @lo
-        sta f:L_LO
-@lo:    lda f:LTILES,x
-        cmp f:L_HI
-        bcc @hi
-        sta f:L_HI
-@hi:    inx
-        inx
-        dec z_tmp
-        bne @t
-        lda #0
-        sta f:L_BUSY
-        rts
-
 ; A = byte offset of a map entry (k*6) -> z_ent = k * LTILES_STRIDE
 entry_offset:
         lsr                     ; k*3
@@ -795,9 +795,56 @@ entry_offset:
         sta z_ent
         rts
 
-; Render label z_id into staging, allocate 2 * cols pool tiles (skipping reserved
-; ones), copy the tiles into the pool image and record them in a new cache entry.
-; cols = max(n, ceil(width / 8)), at most n + 4 and never past the screen edge.
+; (Re)initialise the tile pool when the BG3 name base changed.
+pool_setup:
+        lda f:BG34NBA_SHADOW
+        and #$0007
+        cmp f:L_BASE
+        bne @init
+        lda f:L_POOLN
+        bne @done
+@init:  lda f:BG34NBA_SHADOW
+        and #$0007
+        sta f:L_BASE
+        beq @big
+        cmp #2
+        beq @big
+        ; other scenes (story $A000, in-game $C000): 124 tiles right after the dialogue cache
+        asl
+        tax
+        lda f:cache_table,x
+        clc
+        adc #BUF_COLS*4
+        sta f:L_POOL0
+        lda #124
+        sta f:L_POOLN
+        bra @range
+@big:   lda #$0100              ; the 16x16 kanji font area, unused once labels are Korean
+        sta f:L_POOL0
+        lda #POOL_TILES
+        sta f:L_POOLN
+@range: lda #0
+        sta f:L_NEXT
+        sta f:L_MAPN
+        lda f:L_BASE
+        xba
+        asl
+        asl
+        asl
+        asl
+        sta f:L_VRAMW
+        lda f:L_POOL0
+        asl
+        asl
+        asl
+        clc
+        adc f:L_VRAMW
+        sta f:L_VRAMW
+@done:  rts
+
+; Allocate 2 * cols pool tiles (skipping reserved ones) for label z_id in a new
+; cache entry, then paint. cols = max(n, ceil(width / 8)), at most n + 4 and never
+; past the screen edge.
 label_render:
         jsr label_width         ; A = pixel width of the string
         clc
@@ -821,75 +868,7 @@ label_render:
         cmp z_cols
         bcs @cap2
         sta z_cols
-@cap2:  ; clear the staging area (2 * cols tiles)
-        lda z_cols
-        asl
-        asl
-        asl
-        asl
-        asl                     ; cols * 32 bytes
-        sta z_tmp
-        ldx #0
-        lda #0
-@clr:   sta f:STAGE,x
-        inx
-        inx
-        cpx z_tmp
-        bne @clr
-        ; blit parameters
-        lda #.loword(STAGE)
-        sta z_base
-        lda #16
-        sta z_stride
-        lda z_cols
-        asl
-        asl
-        asl
-        asl
-        sta z_botoff
-        lda z_cols
-        asl
-        asl
-        asl
-        sta z_maxpx
-        lda #0
-        sta z_pen
-        ; draw the string
-        phb
-        pea $B1B1
-        plb
-        plb
-        lda z_id
-        asl
-        tax
-        lda f:LABEL_TABLE,x
-        tay
-@ch:    lda $0000,y
-        and #$00FF
-        beq @end
-        cmp #$0002
-        beq @sp
-        cmp #$00A0
-        beq @skip1
-        cmp #$00F0
-        beq @skip2
-        jsr get_index
-        phy
-        jsr blit_glyph
-        ply
-        bra @ch
-@sp:    lda z_pen
-        clc
-        adc #SPACE_W
-        sta z_pen
-@skip1: iny
-        bra @ch
-@skip2: iny
-        iny
-        bra @ch
-@end:   plb
-        ; new cache entry (wraps the map when full)
-        lda #0
+@cap2:  lda #0
         sta z_row               ; wrap counter
 @entry: lda f:L_MAPN
         cmp #LMAP_ENTRIES*6
@@ -899,9 +878,6 @@ label_render:
         sta f:L_NEXT
 @map_ok:
         jsr entry_offset        ; z_ent from the entry byte offset in A
-        ; allocate and copy 2 * cols tiles
-        lda #1
-        sta f:L_BUSY
         lda #0
         sta z_i
 @tile:  lda f:L_NEXT
@@ -942,7 +918,6 @@ label_render:
         sta z_tile
         inc
         sta f:L_NEXT
-        ; record the tile
         lda z_i
         asl
         clc
@@ -950,49 +925,6 @@ label_render:
         tax
         lda z_tile
         sta f:LTILES,x
-        ; dirty range
-        cmp f:L_LO
-        bcs @lo_ok
-        sta f:L_LO
-@lo_ok: lda z_tile
-        cmp f:L_HI
-        bcc @hi_ok
-        sta f:L_HI
-@hi_ok: ; copy 16 bytes: STAGE + i*16 -> POOL_IMG + tile*16
-        lda z_i
-        asl
-        asl
-        asl
-        asl
-        clc
-        adc #.loword(STAGE)
-        sta z_val
-        lda z_tile
-        asl
-        asl
-        asl
-        asl
-        clc
-        adc #.loword(POOL_IMG)
-        sta z_dst
-        ldy #0
-@cp:    tyx
-        txa
-        clc
-        adc z_val
-        tax
-        lda f:$7E0000,x
-        pha
-        tya
-        clc
-        adc z_dst
-        tax
-        pla
-        sta f:$7E0000,x
-        iny
-        iny
-        cpy #16
-        bne @cp
         inc z_i
         lda z_cols
         asl
@@ -1000,9 +932,6 @@ label_render:
         beq @alloc_done
         jmp @tile
 @alloc_done:
-        lda #0
-        sta f:L_BUSY
-        ; publish the entry
         lda f:L_MAPN
         tax
         clc
@@ -1012,60 +941,361 @@ label_render:
         sta f:LMAP,x
         lda z_cols
         sta f:LMAP+2,x
-        rts
+        ; fall through into label_paint
 
-; (Re)initialise the tile pool when the BG3 name base changed.
-pool_setup:
-        lda f:BG34NBA_SHADOW
-        and #$0007
-        cmp f:L_BASE
-        bne @init
-        lda f:L_POOLN
-        bne @done
-@init:  lda f:BG34NBA_SHADOW
-        and #$0007
-        sta f:L_BASE
-        cmp #5
-        bne @big
-        lda #$0184              ; story scenes: only $B840-$BFFF is free
-        sta f:L_POOL0
-        lda #124
-        sta f:L_POOLN
-        bra @range
-@big:   lda #$0100              ; the 16x16 kanji font area, unused once labels are Korean
-        sta f:L_POOL0
-        lda #POOL_TILES
-        sta f:L_POOLN
-        ; seed the pool image with the original kanji tiles so that uploads spanning
-        ; reserved tiles rewrite them unchanged
+; Render label z_id into staging (2 * z_cols tiles) and queue every tile of the
+; entry at z_ent for upload.
+label_paint:
+        lda z_cols
+        asl
+        asl
+        asl
+        asl
+        asl                     ; cols * 32 bytes
+        sta z_tmp
+        ldx #0
+        lda #0
+@clr:   sta f:STAGE,x
+        inx
+        inx
+        cpx z_tmp
+        bne @clr
+        lda #.loword(STAGE)
+        sta z_base
+        lda #16
+        sta z_stride
+        lda z_cols
+        asl
+        asl
+        asl
+        asl
+        sta z_botoff
+        lda z_cols
+        asl
+        asl
+        asl
+        sta z_maxpx
+        lda #0
+        sta z_pen
         phb
-        ldx #.loword(KANJI_FONT)
-        ldy #.loword(POOL_IMG)
-        lda #POOL_TILES*16-1
-        mvn #^KANJI_FONT, #^POOL_IMG
+        pea $B1B1
         plb
-@range: lda #0
-        sta f:L_NEXT
-        sta f:L_MAPN
-        sta f:L_CUR
-        sta f:L_HI
-        lda #$7FFF
-        sta f:L_LO
-        lda f:L_BASE
-        xba
+        plb
+        lda z_id
         asl
+        tax
+        lda f:LABEL_TABLE,x
+        tay
+@ch:    lda $0000,y
+        and #$00FF
+        beq @end
+        cmp #$0002
+        beq @sp
+        cmp #$00A0
+        beq @skip1
+        cmp #$00F0
+        beq @skip2
+        jsr get_index
+        phy
+        jsr blit_glyph
+        ply
+        bra @ch
+@sp:    lda z_pen
+        clc
+        adc #SPACE_W
+        sta z_pen
+@skip1: iny
+        bra @ch
+@skip2: iny
+        iny
+        bra @ch
+@end:   plb
+        lda #0
+        sta z_i
+@push:  lda z_i
         asl
-        asl
-        asl
-        sta f:L_VRAMW
-        lda f:L_POOL0
+        clc
+        adc z_ent
+        tax
+        lda f:LTILES,x
         asl
         asl
         asl
         clc
         adc f:L_VRAMW
-        sta f:L_VRAMW
+        sta z_val               ; VRAM word address
+        lda z_i
+        asl
+        asl
+        asl
+        asl
+        clc
+        adc #.loword(STAGE)
+        sta z_dst               ; source bytes
+        jsr ring_push
+        inc z_i
+        lda z_cols
+        asl
+        cmp z_i
+        bne @push
+        rts
+
+; Append (z_val = VRAM word, 16 bytes at z_dst) to the upload ring. Waits for the
+; NMI to make room; gives up after a while so a scene with NMI disabled cannot hang.
+ring_push:
+        lda #$4000
+        sta z_spill             ; timeout
+@wait:  lda f:R_TAIL
+        clc
+        adc #RING_ENTRY
+        cmp #RING_BYTES
+        bcc @nowrap
+        lda #0
+@nowrap:
+        cmp f:R_HEAD
+        bne @room
+        dec z_spill
+        bne @wait
+        rts                     ; ring stuck full: drop this tile
+@room:  sta z_shift             ; next tail
+        lda f:R_TAIL
+        tax
+        lda z_val
+        sta f:RING,x
+        phy
+        ldy #0
+@cp:    phx
+        tya
+        clc
+        adc z_dst
+        tax
+        lda f:$7E0000,x
+        plx
+        inx
+        inx
+        sta f:RING,x
+        iny
+        iny
+        cpy #16
+        bne @cp
+        ply
+        lda z_shift
+        sta f:R_TAIL
+        rts
+
+; ---- in-game commentary hooks ------------------------------------------------
+; Message start: replaces TAX / BRL $CC37 at $04:CB34 (G_PTR already holds the string).
+kbb_game_start:
+        lda #1
+        sta f:MODE
+        lda #0
+        sta f:PEN_X
+        sta f:LINE
+        lda f:G_CELL
+        sta f:G_BASE
+        and #$001F
+        sta f:XCOL0             ; column of the first cell
+        lda #32
+        sec
+        sbc f:XCOL0
+        cmp #GAME_COLS
+        bcc @cols_ok
+        lda #GAME_COLS
+@cols_ok:
+        sta f:NCOLS
+        asl
+        asl
+        asl
+        sta f:MAX_PX
+        jsr cache_setup
+        ; queue the cache tile numbers into the 4 tilemap rows of the window
+        lda #0
+        sta f:C_ROW
+@row:   lda f:C_ROW             ; each row gets its own staging buffer: the queue DMAs later
+        asl
+        asl
+        asl
+        asl
+        asl
+        asl
+        tax
+        lda #0
+        sta f:C_COL
+@col:   lda f:C_COL
+        asl
+        asl
+        clc
+        adc f:C_ROW
+        clc
+        adc f:CTILE
+        ora #$2000
+        sta f:STAGE,x
+        inx
+        inx
+        lda f:C_COL
+        inc
+        sta f:C_COL
+        cmp f:NCOLS
+        bne @col
+@queue: lda f:C_ROW
+        asl
+        asl
+        asl
+        asl
+        asl                     ; row * 32 words
+        clc
+        adc f:G_BASE
+        sec
+        sbc #32                 ; first row is the one above the base cell
+        tay
+        lda f:C_ROW
+        asl
+        asl
+        asl
+        asl
+        asl
+        asl
+        clc
+        adc #.loword(STAGE)
+        tax
+        lda f:NCOLS
+        asl
+        phb
+        pea $7E7E               ; the queue records the caller's data bank as the DMA source bank
+        plb
+        plb
+        jsl VRAM_QUEUE
+        plb
+        bcc @queued
+        lda #0
+        jsl TASK_WAIT           ; queue full: wait a frame and retry
+        bra @queue
+@queued:
+        lda f:C_ROW
+        inc
+        sta f:C_ROW
+        cmp #4
+        beq @rows_done
+        jmp @row
+@rows_done:
+        lda #(BUF_COLS-1)*256
+        sta f:RANGE
+        lda #FLAG_MAGIC
+        sta f:FLAG
+        jml GAME_MAIN_HEAD
+
+; G_CELL = line base + ceil(PEN_X / 8) so that the original number printer lands
+; right after the text; afterwards the pen catches up with G_CELL.
+game_sync_cell:
+        lda f:PEN_X
+        clc
+        adc #7
+        lsr
+        lsr
+        lsr
+        clc
+        adc f:G_BASE
+        pha
+        lda f:LINE
+        beq @l0
+        pla
+        clc
+        adc #64
+        pha
+@l0:    pla
+        sta f:G_CELL
+        rts
+
+game_resync_pen:
+        lda f:LINE
+        tax
+        lda f:G_CELL
+        sec
+        sbc f:G_BASE
+        cpx #0
+        beq @l0
+        sec
+        sbc #64
+@l0:    bmi @done
+        asl
+        asl
+        asl
+        cmp f:PEN_X
+        bcc @done
+        beq @done
+        sta f:PEN_X
 @done:  rts
+
+; Main string step: replaces LDA $7E6933 at $04:CC37. DB is set to the script bank.
+kbb_game_main:
+        pea SCRIPT_BANK*256+SCRIPT_BANK
+        plb
+        plb
+        jsr game_resync_pen
+        lda f:G_PTR
+        tay
+        lda $0000,y
+        and #$00FF
+        beq @end
+        cmp #$00A0
+        beq @newline
+        cmp #$0002
+        beq @space
+        cmp #$00F0
+        beq @var
+        jsr get_index
+        tya
+        sta f:G_PTR
+        jsr draw_glyph
+        jml GAME_WAIT
+@end:   jml GAME_MAIN_CONT
+@newline:
+        iny
+        tya
+        sta f:G_PTR
+        jsr do_newline
+        bra kbb_game_main
+@space: iny
+        tya
+        sta f:G_PTR
+        jsr do_space
+        bra kbb_game_main
+@var:   jsr game_sync_cell
+        jml GAME_VAR
+
+; Nested string step: replaces LDA $7E6936 at $04:CB4A and $04:CDA4.
+kbb_game_nested:
+        pea SCRIPT_BANK*256+SCRIPT_BANK
+        plb
+        plb
+        lda f:G_NPTR
+        tay
+        lda $0000,y
+        and #$00FF
+        beq @end
+        cmp #$00F0
+        beq @end
+        cmp #$00A0
+        beq @newline
+        cmp #$0002
+        beq @space
+        jsr get_index
+        tya
+        sta f:G_NPTR
+        jsr draw_glyph
+        jml GAME_WAIT
+@end:   jml GAME_NEST_END
+@newline:
+        iny
+        tya
+        sta f:G_NPTR
+        jsr do_newline
+        bra kbb_game_nested
+@space: iny
+        tya
+        sta f:G_NPTR
+        jsr do_space
+        bra kbb_game_nested
 
 ; ---- NMI hook: upload the dirty columns to VRAM when flagged ----------------
 kbb_nmi:
@@ -1080,9 +1310,32 @@ kbb_nmi:
         plb
         lda f:FLAG
         cmp #FLAG_MAGIC
-        bne @done
+        beq @pending
+        jmp @done
+@pending:
         lda #0
         sta f:FLAG
+        ; the cache VRAM address follows the BG3 name base in effect right now: a
+        ; message can start while the previous scene's registers are still shadowed
+        lda f:BG34NBA_SHADOW
+        and #$0007
+        asl
+        tax
+        lda f:cache_table,x
+        asl
+        asl
+        asl
+        sta f:N_TMP
+        lda f:BG34NBA_SHADOW
+        and #$0007
+        xba
+        asl
+        asl
+        asl
+        asl
+        clc
+        adc f:N_TMP
+        sta f:VRAMW
         lda f:RANGE
         tay                     ; Y = lo | hi << 8
         lda #RANGE_EMPTY
@@ -1146,70 +1399,56 @@ kbb_nmi:
         plp
         jml ORIG_NMI
 
-; Upload up to UPLOAD_CHUNK dirty pool tiles (DB = 0, M/X 16-bit).
+; Upload up to RING_DRAIN queued label tiles (DB = 0, M/X 16-bit).
 nmi_pool_upload:
-        lda f:L_BUSY
-        and #$00FF
-        beq @check
+        lda f:R_HEAD
+        cmp #RING_BYTES
+        bcs @reset
+        lda f:R_TAIL
+        cmp #RING_BYTES
+        bcs @reset
+        lda f:R_HEAD
+        cmp f:R_TAIL
+        bne @go
         rts
-@check: lda f:L_POOLN
-        bne @ready
-        rts                     ; pool never set up (random WRAM after power-on)
-@ready: lda f:L_LO
-        cmp f:L_HI
-        beq @go
-        bcc @go
-        rts                     ; LO > HI: nothing pending
-@go:    lda f:L_HI
-        sec
-        sbc f:L_LO
-        inc
-        cmp #UPLOAD_CHUNK
-        bcc @len_ok
-        lda #UPLOAD_CHUNK
-@len_ok:
-        tax                     ; X = tiles this frame
-        asl
-        asl
-        asl
-        asl
-        sta $4365               ; bytes
-        lda f:L_LO
-        asl
-        asl
-        asl
-        clc
-        adc f:L_VRAMW
-        sta $2116
-        lda f:L_LO
-        asl
-        asl
-        asl
-        asl
-        clc
-        adc #.loword(POOL_IMG)
-        sta $4362
-        sep #$20
-        lda #^POOL_IMG
-        sta $4364
+@reset: lda #0                  ; indices out of range (uninitialised WRAM): drop the queue
+        sta f:R_HEAD
+        sta f:R_TAIL
+        rts
+@go:    sep #$20
         lda #$80
         sta $2115
         lda #$01
         sta $4360
         lda #$18
         sta $4361
+        lda #^RING
+        sta $4364
+        rep #$20
+        ldy #RING_DRAIN
+@next:  lda f:R_HEAD
+        tax
+        lda f:RING,x            ; VRAM word address
+        sta $2116
+        txa
+        clc
+        adc #.loword(RING)+2
+        sta $4362
+        lda #16
+        sta $4365
+        sep #$20
         lda #$40
         sta $420B
         rep #$20
         txa
         clc
-        adc f:L_LO
-        sta f:L_LO
-        cmp f:L_HI
-        bcc @done
-        beq @done
-        lda #$7FFF
-        sta f:L_LO
+        adc #RING_ENTRY
+        cmp #RING_BYTES
+        bcc @nw
         lda #0
-        sta f:L_HI
+@nw:    sta f:R_HEAD
+        cmp f:R_TAIL
+        beq @done
+        dey
+        bne @next
 @done:  rts
