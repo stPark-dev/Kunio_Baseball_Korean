@@ -79,7 +79,7 @@ def test_kanji16_glyphs_are_replaced_with_centered_hangul():
     expect = [[3 if (v >> shift) & (0x8000 >> x) else 0 for x in range(16)] for v in cell]
     assert rows == expect
     assert any(3 in r for r in rows)
-    untouched = kanji16.KANJI16.index("率")
+    untouched = kanji16.KANJI16.index("ア")
     assert font.glyph16(rom, untouched) == [[0] * 16] * 16
 
 
@@ -157,6 +157,7 @@ def test_roster_hooks_and_shift_table():
     assert sites[0x014300][2] == build.jml(build.ENTRY_ROSTER_W4) and sites[0x0142E4][2] == b"\xF4\xB0\x00"
     assert sites[0x0142ED][2] == b"\xBF\x80\xBD\xB1"
     assert sites[0x08395D][2] == build.jml(build.ENTRY_ROSTER_FULL) and sites[0x081456][2] == build.jml(build.ENTRY_ROSTER_FULL7F)
+    assert sites[build.QUEUE_ROM][1] == b"\x08\x8B\xF4\x7E\x00" and sites[build.QUEUE_ROM][2][:4] == build.jml(build.ENTRY_QUEUE)
     assert len(build.MENU_POOL) == 95 and 0x0D not in build.MENU_POOL and all(t & 0xF >= 9 for t in build.MENU_POOL)
     rows = [{"korean": "내야"}, {"korean": "외야"}]
     gs = encode.GlyphSet([r["korean"] for r in rows])
@@ -180,3 +181,27 @@ def test_static8_rows_use_fixed_slots_and_original_tiles():
     assert set(slots.values()) <= set(static8.SLOTS) and not (set(slots.values()) & set(build.MENU_POOL))
     t = slots["투"]
     assert rom[font.FONT_OFFSET + t * 16:font.FONT_OFFSET + t * 16 + 16] == static8.font8.tile8("투")
+
+
+def test_rows8_table_layout():
+    from tools.kbb import encode, rows8
+    rows = [{"bank": "10", "addr": "B25A", "n": 3, "korean": "수비"},
+            {"bank": "10", "addr": "AE08", "n": 5, "korean": "포지션"},
+            {"bank": "10", "addr": "B260", "n": 3, "korean": " "}, {"bank": "10", "addr": "0000", "n": 1, "korean": ""}]
+    gs = encode.GlyphSet([r["korean"] for r in rows])
+    tab = rows8.build_table(rows, gs, 0xA000)
+    count = struct.unpack_from("<H", tab, 0)[0]
+    assert count == 3
+    e = [struct.unpack_from("<BHH", tab, 2 + 5 * i) for i in range(3)]
+    assert [x[1] for x in e] == [0xAE08, 0xB25A, 0xB260]                # sorted by address
+    assert e[0][2] == 0xA000 + 2 + 15 and tab[17:17 + len(gs.encode("포지션"))] == gs.encode("포지션")
+    assert tab[e[2][2] - 0xA000] == 0                                      # blank row = empty string
+
+
+def test_kanji16_two_syllable_glyph():
+    from tools.kbb import font, kanji16
+    rom = bytearray(font.FONT_OFFSET + font.FONT_SIZE)
+    build.korean_kanji16(rom)
+    rows = font.glyph16(rom, kanji16.KANJI16.index("選"))
+    assert any(3 in r[:8] for r in rows) and any(3 in r[8:] for r in rows)   # 선 | 수 side by side
+    assert all(rows[2 * y] == rows[2 * y + 1] for y in range(8))            # stretched 2x vertically

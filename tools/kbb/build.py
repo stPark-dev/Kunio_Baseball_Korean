@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 
-from tools.kbb import bg2, encode, font8, glyphs, grid, ingame, script, static8, text
+from tools.kbb import bg2, encode, font8, glyphs, grid, ingame, rows8, script, static8, text
 from tools.kbb import labels as L
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -36,6 +36,9 @@ POOL8_ROM = CODE_ROM + 0x3E00                # $B1:BE00: u16 count, then dynamic
 MPOOL_ROM = CODE_ROM + 0x3E80                # $B1:BE80: u16 count, then menu font slots for roster names
 SHIFT_ROM = CODE_ROM + 0x3D00                # $B1:BD00: 8 x 4-byte pointers, then the shift strings
 TABLE_LIST_ROM = CODE_ROM + 0x3D80           # $B1:BD80: the lineup task's 7 table addresses (new bank)
+ROWS8_ROM = CODE_ROM + 0x2000                # $B1:A000: queue-hook row table + strings (up to $B1:BCFF)
+ROWS8_LIMIT = 0x1D00
+QUEUE_ROM = 0x0070FD                         # $80:F0FD, the VRAM queue routine
 TABLE_LIST = ("surname", "name_extra1", "name_extra2", "name_set3", "name_set4", "name_set5", "item")
 MENU_POOL = [t for t in range(256) if t & 0xF in (0x9, 0xA, 0xB, 0xD, 0xE, 0xF) and t != 0x0D]
 ASM_SOURCE = os.path.join(ROOT, "tools", "kbb", "asm", "text.s")
@@ -46,7 +49,7 @@ CODE_ENTRY = 0xB18000
 (ENTRY_START, ENTRY_MAIN, ENTRY_NESTED, ENTRY_NMI, ENTRY_LABEL,
  ENTRY_GAME_START, ENTRY_GAME_MAIN, ENTRY_GAME_NESTED, ENTRY_HUD_NAME,
  ENTRY_ROSTER_NAME, ENTRY_ROSTER_SHIFT, ENTRY_ROSTER_ITEM, ENTRY_ROSTER_W4,
- ENTRY_ROSTER_FULL, ENTRY_ROSTER_FULL7F) = (CODE_ENTRY + 4 * k for k in range(15))
+ ENTRY_ROSTER_FULL, ENTRY_ROSTER_FULL7F, ENTRY_QUEUE) = (CODE_ENTRY + 4 * k for k in range(16))
 GAME_PX = 176          # in-game commentary window: 22 columns
 # The in-game hooks work in isolation but every byte of VRAM is in use during a match
 # (BG1 has a 64x64 tilemap at $E000-$FFFF), so there is no room for the glyph cache yet.
@@ -118,6 +121,7 @@ def patches(table_addr, game_text=GAME_TEXT):
         (0x014300, b"\xA4\x34\xB1\x32", jml(ENTRY_ROSTER_W4)),       # lineup task char loop
         (0x08395D, b"\xAD\x9D\x71\x0A", jml(ENTRY_ROSTER_FULL)),     # $90:B95D full-name rows
         (0x081456, b"\xBF\xD3\x8B\x86", jml(ENTRY_ROSTER_FULL7F)),   # $90:9456 player list in the $7F shadow
+        (QUEUE_ROM, b"\x08\x8B\xF4\x7E\x00", jml(ENTRY_QUEUE) + b"\xEA"),   # VRAM queue: translated ROM rows
     ]
     return base + (game if game_text else [])
 
@@ -224,9 +228,18 @@ def korean_kanji16(rom):
     from tools.kbb import font, glyphs
     from tools.kbb.kanji16 import KANJI16, KOREAN16
     for ch, ko in KOREAN16.items():
-        dw, cell = glyphs.render(ko)
-        shift = (16 - dw) // 2
-        px = [[3 if (v >> shift) & (0x8000 >> x) else 0 for x in range(16)] for v in cell]
+        if len(ko) == 2:                      # two 8px syllables side by side, stretched to 16 rows
+            px = [[0] * 16 for _ in range(16)]
+            for i, c in enumerate(ko):
+                cell8 = font8.render8(c) or [[0] * 8] * 8
+                for y in range(8):
+                    for x in range(8):
+                        if cell8[y][x]:
+                            px[2 * y][8 * i + x] = px[2 * y + 1][8 * i + x] = 3
+        else:
+            dw, cell = glyphs.render(ko)
+            shift = (16 - dw) // 2
+            px = [[3 if (v >> shift) & (0x8000 >> x) else 0 for x in range(16)] for v in cell]
         for n in (i for i, c in enumerate(KANJI16) if c == ch):
             tl = 0x100 + (n // 8) * 0x20 + (n % 8) * 2
             for t, (ox, oy) in zip((tl, tl + 1, tl + 0x10, tl + 0x11), ((0, 0), (8, 0), (0, 8), (8, 8))):
@@ -275,15 +288,16 @@ def shift_table(rows, gs):
 
 
 def build(original, csv_path=None, labels_csv=None, ingame_csv=None, teams_csv=None, bg2_csv=None,
-          roster_csv=None, static8_csv=None, log=print):
+          roster_csv=None, static8_csv=None, rows8_csv=None, log=print):
     if hashlib.md5(original).hexdigest() != ORIGINAL_MD5:
         raise BuildError("original ROM md5 mismatch")
     rom = bytearray(original) + b"\xFF" * (ROM_SIZE - len(original))
     texts, korean_ids = load_texts(original, csv_path)
     label_rows = load_labels(labels_csv)
     roster_rows = load_ingame(roster_csv)
+    rows8_rows = load_ingame(rows8_csv)
     gs = encode.GlyphSet(list(texts.values()) + [r["korean"] for r in label_rows]
-                         + [r["korean"] for r in roster_rows])
+                         + [r["korean"] for r in roster_rows] + [r["korean"] for r in rows8_rows])
     encoded = {k: gs.encode(v) for k, v in texts.items()}
     bank, table_addr = script.build_bank(original, encoded)
     widths, bitmaps = gs.bitmaps()
@@ -330,6 +344,12 @@ def build(original, csv_path=None, labels_csv=None, ingame_csv=None, teams_csv=N
         if roster_rows:
             tab = shift_table(roster_rows, gs)
             rom[SHIFT_ROM:SHIFT_ROM + len(tab)] = tab
+        if rows8_rows:
+            tab = rows8.build_table(rows8_rows, gs, 0x8000 | ROWS8_ROM % 0x8000)
+            if len(tab) > ROWS8_LIMIT:
+                raise BuildError("queue-hook row table too large")
+            rom[ROWS8_ROM:ROWS8_ROM + len(tab)] = tab
+            log("queue-hook rows: %d translated" % sum(1 for r in rows8_rows if r.get("korean")))
         g8 = glyph8_table(gs)
         rom[GLYPH8_ROM:GLYPH8_ROM + len(g8)] = g8
         log("in-game font: %d static syllables, %d dynamic slots" % (len(static), len(pool)))
@@ -364,10 +384,11 @@ def main():
     bg2_csv = os.path.join(ROOT, "translations", "bg2.csv")
     roster_csv = os.path.join(ROOT, "translations", "roster.csv")
     static8_csv = os.path.join(ROOT, "translations", "static8.csv")
+    rows8_csv = os.path.join(ROOT, "translations", "rows8.csv")
     if "--csv" in sys.argv:
         csv_path = sys.argv[sys.argv.index("--csv") + 1]
     original = open(args[0], "rb").read()
-    rom, _ = build(original, csv_path, labels_csv, ingame_csv, teams_csv, bg2_csv, roster_csv, static8_csv)
+    rom, _ = build(original, csv_path, labels_csv, ingame_csv, teams_csv, bg2_csv, roster_csv, static8_csv, rows8_csv)
     open(args[1], "wb").write(rom)
     print("wrote", args[1], len(rom), "bytes")
 

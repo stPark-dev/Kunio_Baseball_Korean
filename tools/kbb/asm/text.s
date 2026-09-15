@@ -99,6 +99,20 @@ M_NEXT  = GST+14
 M_BUF   = $7E9BE0               ; cell buffer (low word, bank $7E)
 M_CELLS = $7E9BE2
 SHIFT_TABLE = $B1BD00           ; 4-byte entries: low word = string address in bank $B1
+; VRAM queue hook: rows queued straight from ROM (player-info labels and values)
+ROWS8   = $B1A000               ; u16 count, entries (u8 bank, u16 addr, u16 string), strings
+ROWBUF  = $7E8C40               ; 8 rotating 64-byte row buffers ($8C40-$8E3F)
+M_ROW   = $7E9BE4
+Q_A     = $7E9BE6
+Q_X     = $7E9BE8
+Q_Y     = $7E9BEA
+Q_DB    = $7E9BEC
+Q_CNT   = $7E9BEE
+Q_STR   = $7E9BF0
+Q_ATTR  = $7E9BF2
+Q_BUF   = $7E9BF4
+Q_CELLS = $7E9BF6
+QUEUE_CONT = $80F102            ; after the replaced PHP / PHB / PEA $007E
 ROSTER_NAME_RTS  = $82EACC
 ROSTER_SHIFT_RTS = $82EB6F
 ROSTER_ITEM_RTS  = $82EB1E
@@ -183,6 +197,7 @@ z_i     = $32
         jml kbb_roster_w4       ; $B18030
         jml kbb_roster_full     ; $B18034
         jml kbb_roster_full7f   ; $B18038
+        jml kbb_queue           ; $B1803C
 
 bit_table:
         .word $0001, $0002, $0004, $0008, $0010, $0020, $0040, $0080
@@ -1913,4 +1928,170 @@ m_get:
         sta f:z_dst+Z+$7E0000
         jsr ring_push_rom
         lda f:D_TMP
+        rts
+
+; ---- VRAM queue hook: replaces PHP PHB PEA $007E at $80F0FD --------------------------
+; X = source in DB, Y = VRAM word, A = bytes. Rows listed in ROWS8 (by caller bank and
+; address) are redrawn in Korean through the menu 8x8 cache into a row buffer and queued
+; from there; everything else continues in the original routine. A/X/Y and the carry
+; result behave as the original.
+kbb_queue:
+        php
+        rep #$30
+        pha
+        lda #0
+        sep #$20
+        phb
+        pla
+        rep #$20
+        and #$007F              ; ROM bank number as in the table ($80+ mirrors too)
+        cmp #$007E
+        bcs @pass0              ; WRAM sources are never translated rows
+        sta f:Q_DB
+        txa
+        sta f:Q_X
+        tya
+        sta f:Q_Y
+        lda f:ROWS8
+        sta f:Q_CNT
+        ldx #2
+@scan:  lda f:Q_CNT
+        beq @pass1
+        dec
+        sta f:Q_CNT
+        lda f:ROWS8,x
+        and #$00FF
+        cmp f:Q_DB
+        bne @next
+        lda f:ROWS8+1,x
+        cmp f:Q_X
+        beq @found
+@next:  txa
+        clc
+        adc #5
+        tax
+        bra @scan
+@pass1: lda f:Q_X
+        tax
+        lda f:Q_Y
+        tay
+@pass0: pla
+        plp
+        php
+        phb
+        pea $007E
+        jml QUEUE_CONT
+@found: lda f:ROWS8+3,x
+        sta f:Q_STR
+        pla
+        sta f:Q_A
+        phb
+        lda f:Q_X
+        tax
+        lda a:$0000,x           ; attribute of the original row
+        and #$FC00
+        sta f:Q_ATTR
+        lda f:M_ROW
+        inc
+        and #7
+        sta f:M_ROW
+        asl
+        asl
+        asl
+        asl
+        asl
+        asl
+        clc
+        adc #.loword(ROWBUF)
+        sta f:Q_BUF
+        lda f:Q_A
+        lsr
+        cmp #33
+        bcc @cells
+        lda #32
+@cells: sta f:Q_CELLS
+        pea $B1B1
+        plb
+        plb
+        lda f:Q_STR
+        tay
+        ldx #0
+@ch:    txa
+        lsr
+        cmp f:Q_CELLS
+        bcs @done
+        lda $0000,y
+        and #$00FF
+        beq @pad
+        cmp #$0002
+        beq @sp
+        cmp #$00A0
+        bcs @skip
+        cmp #$0003
+        bcc @skip1
+        phx
+        jsr get_index
+        phy
+        jsr m_get
+        ply
+        plx
+        bra @put
+@sp:    iny
+        lda #$0002
+@put:   ora f:Q_ATTR
+        jsr q_store
+        bra @ch
+@skip:  iny
+@skip1: iny
+        bra @ch
+@pad:   txa
+        lsr
+        cmp f:Q_CELLS
+        bcs @done
+        lda f:Q_ATTR
+        jsr q_store
+        bra @pad
+@done:  pea $7E7E
+        plb
+        plb
+        lda f:Q_BUF
+        tax
+        lda f:Q_Y
+        tay
+        lda f:Q_A
+        jsl $80F0FD             ; re-enters this hook, which passes WRAM sources through
+        plb
+        bcs @full
+        lda f:Q_X
+        tax
+        lda f:Q_Y
+        tay
+        lda f:Q_A
+        plp
+        clc
+        rtl
+@full:  lda f:Q_X
+        tax
+        lda f:Q_Y
+        tay
+        lda f:Q_A
+        plp
+        sec
+        rtl
+
+; A = cell word, X = byte offset in the row buffer -> stored; X += 2
+q_store:
+        pha
+        txa
+        clc
+        adc f:Q_BUF
+        tax
+        pla
+        sta f:$7E0000,x
+        txa
+        sec
+        sbc f:Q_BUF
+        inc
+        inc
+        tax
         rts

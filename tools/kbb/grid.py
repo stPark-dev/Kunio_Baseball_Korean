@@ -2,7 +2,7 @@
 [name_x, y, level_x, y+1, 4 top tile words, 4 bottom tile words], i.e. two 16x16 glyphs
 per team name (熱血, 花園, ...). The names are kun readings, so one glyph cannot stand
 for one syllable; instead each Korean name is drawn with the 8px font into two dedicated
-16x16 glyph slots (SLOT_GLYPHS) and the record words are repointed to those slots.
+16x16 glyph slots (SLOT_GLYPHS: glyphs nothing else needs) and the record words are repointed.
 The slots must stay out of the label tile pool (see build.reserved_bitmap)."""
 import struct
 
@@ -12,12 +12,15 @@ from tools.kbb.kanji16 import KANJI16, tile_to_index
 TABLE = 0x08C48B
 RECORD = 24
 NAME_PX = 32
-SLOT_GLYPHS = "花園宝陵霧雨白鷹冷峰愛然明暗夢谷服部全米商業学院高校"
+# glyph indices no translated screen needs: ア い ち け 行 使 ・ 用 勝(x2) 負 決 準 ! 練 習 品 賞
+# 気 死 攻 後 代 見 交 作 (the unread glyphs 0x41-0x43 are the [ ] brackets of the story screens)
+SLOT_GLYPHS = [0x07, 0x44, 0x52, 0x5A, 0x47, 0x48, 0x49, 0x50, 0x51, 0x59, 0x78, 0x79, 0x7A,
+               0x7B, 0x6D, 0x75, 0x76, 0x6E, 0x68, 0x64, 0x65, 0x5D, 0x37, 0x27, 0x2F, 0x3F]
 
 
 def glyph_tiles(ch):
-    """(top-left, top-right, bottom-left, bottom-right) tile numbers of a 16x16 glyph."""
-    k = KANJI16.index(ch)
+    """(top-left, top-right, bottom-left, bottom-right) tile numbers of a 16x16 glyph (char or index)."""
+    k = ch if isinstance(ch, int) else KANJI16.index(ch)
     tl = 0x100 + (k // 8) * 0x20 + (k % 8) * 2
     return tl, tl + 1, tl + 0x10, tl + 0x11
 
