@@ -32,3 +32,18 @@ def test_patch_table_addresses_use_table_map():
     # with the original addresses the data patches are no-ops apart from the bank byte
     changed = [off for off, old, new in p if old != new]
     assert 0x0869FA in changed and 0x086A05 not in changed
+
+
+def test_label_table_and_marking():
+    from tools.kbb import encode
+    rows = [{"id": "a", "bank": "11", "top": "8003", "bottom": "800B", "n": "4", "korean": "가 나"}]
+    gs = encode.GlyphSet(["가 나"])
+    data = build.label_table(rows, gs)
+    assert data[:2] == struct.pack("<H", 0xC002)
+    assert data[2:] == gs.encode("가 나")
+    rom = bytearray(0x90000)
+    build.mark_labels(rom, rows)
+    top = 0x11 * 0x8000 + 3
+    assert struct.unpack_from("<H", rom, top)[0] == 0xC000
+    assert struct.unpack_from("<H", rom, top + 8)[0] == 0xD000
+    assert rom[top + 2:top + 8] == b"\x00" * 6
