@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 
-from tools.kbb import encode, font8, glyphs, grid, ingame, script, text
+from tools.kbb import bg2, encode, font8, glyphs, grid, ingame, script, text
 from tools.kbb import labels as L
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -245,7 +245,7 @@ def glyph8_table(gs):
     return bytes(out)
 
 
-def build(original, csv_path=None, labels_csv=None, ingame_csv=None, teams_csv=None, log=print):
+def build(original, csv_path=None, labels_csv=None, ingame_csv=None, teams_csv=None, bg2_csv=None, log=print):
     if hashlib.md5(original).hexdigest() != ORIGINAL_MD5:
         raise BuildError("original ROM md5 mismatch")
     rom = bytearray(original) + b"\xFF" * (ROM_SIZE - len(original))
@@ -297,6 +297,7 @@ def build(original, csv_path=None, labels_csv=None, ingame_csv=None, teams_csv=N
         log("in-game font: %d static syllables, %d dynamic slots" % (len(static), len(pool)))
     ltab = label_table(label_rows, gs)
     rom[LABEL_TABLE_ROM:LABEL_TABLE_ROM + len(ltab)] = ltab
+    bg2.apply(rom, load_ingame(bg2_csv), log)
     team_tiles = grid.encode(rom, load_ingame(teams_csv))
     rom[RESERVED_ROM:RESERVED_ROM + 64] = reserved_bitmap(original, L.extract(original), label_rows, team_tiles)
     mark_labels(rom, label_rows)
@@ -319,10 +320,11 @@ def main():
     labels_csv = os.path.join(ROOT, "translations", "labels.csv")
     ingame_csv = os.path.join(ROOT, "translations", "ingame.csv")
     teams_csv = os.path.join(ROOT, "translations", "teams.csv")
+    bg2_csv = os.path.join(ROOT, "translations", "bg2.csv")
     if "--csv" in sys.argv:
         csv_path = sys.argv[sys.argv.index("--csv") + 1]
     original = open(args[0], "rb").read()
-    rom, _ = build(original, csv_path, labels_csv, ingame_csv, teams_csv)
+    rom, _ = build(original, csv_path, labels_csv, ingame_csv, teams_csv, bg2_csv)
     open(args[1], "wb").write(rom)
     print("wrote", args[1], len(rom), "bytes")
 

@@ -1,0 +1,39 @@
+id,kind,tileset,target,japanese,korean
+team_00,glyph,,"60,61,70,71",熱,열
+team_01,glyph,,"62,63,72,73",花,하
+team_02,glyph,,"a2,a3,b2,b3",宝,호
+team_03,glyph,,"e0,e1,f0,f1",霧,키
+team_04,glyph,,"c2,c3,d2,d3",白,시
+team_05,glyph,,"80,81,90,91",冷,레
+team_06,glyph,,"04,05,14,15",愛,아
+team_07,glyph,,"a0,a1,b0,b1",明,메
+team_08,glyph,,"c0,c1,d0,d1",黒,코
+team_09,glyph,,"06,07,16,17",夢,유
+team_10,glyph,,"82,83,92,93",谷,타
+team_11,glyph,,"e2,e3,f2,f3",服,핫
+team_12,glyph,,"e4,e5,f4,f5",米,전
+inning_kai,glyph,,"e6,85,f6,95",回,회
+inning_omote,glyph,,"86,87,96,97",表,초
+inning_ura,glyph,,"a4,a5,b4,b5",裏,말
+stat_防率,overlay,,02F9D2,防率,방어율
+stat_投数,overlay,,02F9F2,投数,투구수
+stat_打率,overlay,,02FA12,打率,타율
+stat_本打,overlay,,02FA32,本打,홈런
+stat_打数,overlay,,02FA52,打数,타수
+banner_A_00,banner,A,077C78,ストライク,스트라이크
+banner_A_01,banner,A,077C9E,ボール,볼
+banner_A_02,banner,A,077CC4,バッターアウト,타자 아웃
+banner_A_03,banner,A,077CEA,フォアボール,볼 넷
+banner_A_04,banner,A,077D10,タイム,타임
+banner_A_05,banner,A,077D36,チェンジ,체인지
+banner_A_06,banner,A,077D5C,プレーボール,플레이 볼
+banner_A_07,banner,A,077D82,コールドゲーム,콜드 게임
+banner_A_08,banner,A,077DA8,ゲームセット,게임 셋
+banner_A_09,banner,A,077DCE,デッドボール,데드 볼
+banner_A_10,banner,A,077DF4,打撃妨害!,타격방해!
+banner_B_00,banner,B,077E14,アウト,아웃
+banner_B_01,banner,B,077E34,ポーズ,포즈
+banner_B_02,banner,B,077E54,セーフ,세이프
+banner_B_03,banner,B,077E74,ファール,파울
+banner_B_04,banner,B,077E94,チェンジ,체인지
+banner_B_05,banner,B,077EB4,ホームラン,홈런

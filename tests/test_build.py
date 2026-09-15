@@ -98,3 +98,51 @@ def test_grid_records_and_encode():
     top = font.tile(rom, s0[0])
     assert top[:4] == [[0] * 8] * 4 and any(3 in r for r in top[4:])   # text sits in the middle rows
     assert any(3 in r for r in font.tile(rom, s0[2])[:4])
+
+
+def test_bg2_tile_codec_and_styles():
+    from tools.kbb import bg2
+    rows = [[(x + y) % 16 for x in range(8)] for y in range(8)]
+    assert bg2.decode_tile(bg2.encode_tile(rows), 0) == rows
+    tiles = bg2.glyph_tiles("열")
+    assert len(tiles) == 4
+    colours = {v for t in tiles for r in bg2.decode_tile(t, 0) for v in r}
+    assert colours == {0, bg2.FILL, bg2.SHADOW}
+    tiles = bg2.banner_tiles("볼")
+    assert len(tiles) == 16 and not any(tiles[0]) and any(tiles[3])          # centred: cols 3-4
+    assert bg2.OUTLINE in {v for r in bg2.decode_tile(tiles[3], 0) for v in r}
+    shared = {t for t in bg2.banner_tiles("볼") if any(t)}
+    assert shared <= {t for t in bg2.banner_tiles("플레이 볼") if any(t)}   # word-aligned tiles are reused
+    assert len(bg2.overlay_tiles("타율")) == 10
+
+
+def test_bg2_apply_repoints_rows_into_freed_tiles():
+    import struct as st
+    from tools.kbb import bg2
+    rom = bytearray(bg2.TILESETS["A"] + 0x2000)
+    for base in bg2.TILESETS.values():
+        rom[base:base + 0x2000] = bytes(range(256)) * 32
+    top, banner = 0x100, 0x200
+    st.pack_into("<8H", rom, top, 0x3C20, 0x3C21, 0x3C02, 0x3C03, 8, 8, 8, 8)
+    st.pack_into("<8H", rom, top + 16, 0x3C30, 0x3C31, 0x3C12, 0x3C13, 8, 8, 0x3CC6, 8)
+    words = [0x2008, 0x3C88, 0x3C89, 0x3C8A, 0x3C8B, 0x2008, 0x2008, 0x2008] * 2
+    st.pack_into("<16H", rom, banner, *words)
+    rows = [{"kind": "glyph", "tileset": "", "target": "60,61,70,71", "korean": "열"},
+            {"kind": "overlay", "tileset": "", "target": "%X" % top, "korean": "타율"},
+            {"kind": "banner", "tileset": "A", "target": "%X" % banner, "korean": "볼"}]
+    pools = bg2.apply(rom, rows, log=lambda *a: None)
+    freed = {0x20, 0x21, 0x02, 0x03, 0x30, 0x31, 0x12, 0x13, 0x88, 0x89, 0x8A, 0x8B}
+    new = st.unpack_from("<16H", rom, banner)
+    used = {w & 0x3FF for w in new if w != bg2.BLANK_WORD}
+    assert used and used <= freed and all(w >> 10 == 0x3C00 >> 10 for w in new if w != bg2.BLANK_WORD)
+    ov = st.unpack_from("<8H", rom, top)
+    assert ov[0] & 0xFC00 == 0x3C00 and ov[2] == 0x0008 and ov[5:] == (8, 8, 8)     # 2 syllables, digits kept
+    assert st.unpack_from("<H", rom, top + 16 + 12)[0] == 0x3CC6
+    a, b = bg2.TILESETS["A"], bg2.TILESETS["B"]
+    t = ov[0] & 0x3FF
+    mirrored = bg2.with_background(rom[a + t * 32:a + t * 32 + 32], 2)
+    assert rom[b + t * 32:b + t * 32 + 32] == mirrored                              # overlay mirrored into set B on black
+    assert rom[a + 0x60 * 32:a + 0x60 * 32 + 32] == bg2.glyph_tiles("열")[0]
+    assert rom[b + 0x60 * 32:b + 0x60 * 32 + 32] == bg2.with_background(bg2.glyph_tiles("열")[0], 2)
+    assert 0 not in {v for r in bg2.decode_tile(rom, b + 0x60 * 32) for v in r}
+    assert pools["A"].free and pools["B"].free
