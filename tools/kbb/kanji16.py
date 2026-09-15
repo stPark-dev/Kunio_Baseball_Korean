@@ -21,6 +21,17 @@ KANJI16 = list(
     "合人三板四習品8"
     "決勝準!大試投米"
 )
+# Glyphs 0x2A/0x2B ("火小" above) are really the half-width pairs "メン"/"バー" of 先発メンバー,
+# and 0x3C is "デー" of データ. Korean replacements drawn over the glyph bitmaps (image translation)
+# for the screens whose text data is not located (VS title, pre-game menu). Sino-Korean readings
+# are the same wherever a glyph appears, so one syllable per glyph is safe.
+KOREAN16 = {
+    "熱": "열", "血": "혈", "野": "야", "球": "구", "大": "대", "会": "회", "対": "대",
+    "第": "제", "回": "회", "戦": "전",
+    "先": "선", "発": "발", "火": "멤", "小": "버", "変": "변", "更": "경",
+    "打": "타", "順": "순", "守": "수", "備": "비", "選": "선", "手": "수", "デ": "정", "タ": "보",
+}
+
 # tiles 0x24E.. hold two digits per glyph: "01", "23", ...
 DIGIT_PAIRS = {0x24E: "01", 0x26E: "23", 0x28E: "45", 0x2AE: "67", 0x2CE: "89"}
 

@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 
-from tools.kbb import encode, font8, glyphs, ingame, script, text
+from tools.kbb import encode, font8, glyphs, grid, ingame, script, text
 from tools.kbb import labels as L
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -180,11 +180,11 @@ def mark_labels(rom, rows):
             rom[off:off + 2 * n] = struct.pack("<H", mark | lid) + b"\x00\x00" * (n - 1)
 
 
-def reserved_bitmap(rom, all_rows, translated):
+def reserved_bitmap(rom, all_rows, translated, extra=()):
     """Kanji-area tiles (0x100-0x2FF) that untranslated labels still draw, as 512 bits."""
     from tools.kbb.kanji16 import KANJI16
     done = {r["id"] for r in translated}
-    tiles = set()
+    tiles = set(extra)
     for r in all_rows:
         if r["id"] in done:
             continue
@@ -202,6 +202,21 @@ def reserved_bitmap(rom, all_rows, translated):
         if 0x100 <= t < 0x300:
             bits[(t - 0x100) >> 3] |= 1 << ((t - 0x100) & 7)
     return bytes(bits)
+
+
+def korean_kanji16(rom):
+    """Draw Korean syllables over the 16x16 kanji glyphs listed in kanji16.KOREAN16 (in place)."""
+    from tools.kbb import font, glyphs
+    from tools.kbb.kanji16 import KANJI16, KOREAN16
+    for ch, ko in KOREAN16.items():
+        dw, cell = glyphs.render(ko)
+        shift = (16 - dw) // 2
+        px = [[3 if (v >> shift) & (0x8000 >> x) else 0 for x in range(16)] for v in cell]
+        for n in (i for i, c in enumerate(KANJI16) if c == ch):
+            tl = 0x100 + (n // 8) * 0x20 + (n % 8) * 2
+            for t, (ox, oy) in zip((tl, tl + 1, tl + 0x10, tl + 0x11), ((0, 0), (8, 0), (0, 8), (8, 8))):
+                off = font.FONT_OFFSET + t * font.TILE_BYTES
+                rom[off:off + font.TILE_BYTES] = font.encode_tile([r[ox:ox + 8] for r in px[oy:oy + 8]])
 
 
 def load_ingame(csv_path):
@@ -230,7 +245,7 @@ def glyph8_table(gs):
     return bytes(out)
 
 
-def build(original, csv_path=None, labels_csv=None, ingame_csv=None, log=print):
+def build(original, csv_path=None, labels_csv=None, ingame_csv=None, teams_csv=None, log=print):
     if hashlib.md5(original).hexdigest() != ORIGINAL_MD5:
         raise BuildError("original ROM md5 mismatch")
     rom = bytearray(original) + b"\xFF" * (ROM_SIZE - len(original))
@@ -282,8 +297,10 @@ def build(original, csv_path=None, labels_csv=None, ingame_csv=None, log=print):
         log("in-game font: %d static syllables, %d dynamic slots" % (len(static), len(pool)))
     ltab = label_table(label_rows, gs)
     rom[LABEL_TABLE_ROM:LABEL_TABLE_ROM + len(ltab)] = ltab
-    rom[RESERVED_ROM:RESERVED_ROM + 64] = reserved_bitmap(original, L.extract(original), label_rows)
+    team_tiles = grid.encode(rom, load_ingame(teams_csv))
+    rom[RESERVED_ROM:RESERVED_ROM + 64] = reserved_bitmap(original, L.extract(original), label_rows, team_tiles)
     mark_labels(rom, label_rows)
+    korean_kanji16(rom)
     rom[SCRIPT_ROM:SCRIPT_ROM + len(bank)] = bank
     rom[CODE_ROM:CODE_ROM + len(code)] = code
     rom[WIDTHS_ROM:WIDTHS_ROM + len(widths)] = widths
@@ -301,10 +318,11 @@ def main():
     csv_path = os.path.join(ROOT, "translations", "strings.csv")
     labels_csv = os.path.join(ROOT, "translations", "labels.csv")
     ingame_csv = os.path.join(ROOT, "translations", "ingame.csv")
+    teams_csv = os.path.join(ROOT, "translations", "teams.csv")
     if "--csv" in sys.argv:
         csv_path = sys.argv[sys.argv.index("--csv") + 1]
     original = open(args[0], "rb").read()
-    rom, _ = build(original, csv_path, labels_csv, ingame_csv)
+    rom, _ = build(original, csv_path, labels_csv, ingame_csv, teams_csv)
     open(args[1], "wb").write(rom)
     print("wrote", args[1], len(rom), "bytes")
 

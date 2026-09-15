@@ -66,3 +66,35 @@ def test_encode_record_writes_words_in_place():
     words = struct.unpack_from("<11H", rom, 4)
     assert words[:3] == (0x2009, 0x2002, 0x2013)
     assert words[3:] == (0x2002,) * 8
+
+
+def test_kanji16_glyphs_are_replaced_with_centered_hangul():
+    from tools.kbb import font, glyphs, kanji16
+    rom = bytearray(font.FONT_OFFSET + font.FONT_SIZE)
+    build.korean_kanji16(rom)
+    n = kanji16.KANJI16.index("熱")
+    rows = font.glyph16(rom, n)
+    dw, cell = glyphs.render("열")
+    shift = (16 - dw) // 2
+    expect = [[3 if (v >> shift) & (0x8000 >> x) else 0 for x in range(16)] for v in cell]
+    assert rows == expect
+    assert any(3 in r for r in rows)
+    untouched = kanji16.KANJI16.index("率")
+    assert font.glyph16(rom, untouched) == [[0] * 16] * 16
+
+
+def test_grid_records_and_encode():
+    from tools.kbb import font, grid
+    rom = bytearray(font.FONT_OFFSET + font.FONT_SIZE)
+    a, b = grid.glyph_tiles("花"), grid.glyph_tiles("園")
+    struct.pack_into("<12H", rom, grid.TABLE, 14, 8, 18, 9, a[0], a[1], b[0], b[1], a[2], a[3], b[2], b[3])
+    recs = grid.records(rom)
+    assert len(recs) == 1 and recs[0]["japanese"] == "花園" and recs[0]["name_x"] == 14
+    used = grid.encode(rom, [{"offset": "%06X" % grid.TABLE, "korean": "하나조노"}])
+    s0, s1 = grid.glyph_tiles(grid.SLOT_GLYPHS[0]), grid.glyph_tiles(grid.SLOT_GLYPHS[1])
+    words = struct.unpack_from("<8H", rom, grid.TABLE + 8)
+    assert words == (s0[0], s0[1], s1[0], s1[1], s0[2], s0[3], s1[2], s1[3])
+    assert used == set(words) and used <= grid.slot_tiles()
+    top = font.tile(rom, s0[0])
+    assert top[:4] == [[0] * 8] * 4 and any(3 in r for r in top[4:])   # text sits in the middle rows
+    assert any(3 in r for r in font.tile(rom, s0[2])[:4])
