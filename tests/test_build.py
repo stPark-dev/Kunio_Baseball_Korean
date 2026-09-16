@@ -299,3 +299,11 @@ def test_lz_decompressor_runs_and_backrefs():
     stream = bytes([0x21, 0xAA, 0x12, 0x01, 0x02, 0x80, 0x01, 0x00])
     rom[0:len(stream)] = stream
     assert lz.decompress(rom, 0, dictionary) == b"\xAA\xAA\x01\x02\x11\x12\x13"
+
+
+def test_title_logo_never_writes_the_shared_blank_tile():
+    from tools.kbb import titlelogo
+    used = [titlelogo.line_tile(b, r, c)
+            for b in titlelogo.BLOCKS for r in range(b["rows"]) for c in range(b["cols"])]
+    assert len(used) == len(set(used))                       # every cell has its own tile
+    assert set(used).isdisjoint(titlelogo.SHARED_TILES)      # background blank tile stays intact

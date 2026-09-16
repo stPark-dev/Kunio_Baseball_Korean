@@ -10,9 +10,63 @@ placed by the BG2 tilemap (`$93:9260` -> `$7F:8800`). Three text blocks sit in i
 Both the tiles and those tilemap rows are replaced at run time (see `kbb_sheet2`), so the
 drawing here only has to produce the same tile numbers in the same cells.
 """
+import os
 import struct
 
 from tools.kbb import glyphs
+
+ART = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                   "assets", "title_logo.png")
+# the drawing's own colours: background/outline white, black, blue, green, red, then two greys
+# that the antialiased edges fall into and that we fold into the black outline
+ART_REF = ((224, 224, 224), (20, 20, 20), (64, 96, 224), (128, 176, 32), (192, 32, 16),
+           (128, 128, 128), (176, 176, 176))
+WHITE, BLACK, BLUE, GREEN, RED = 0, 1, 2, 3, 4
+# source boxes of the three blocks, measured on the drawing
+ART_BOXES = dict(line1=(110, 0, 395, 78), line2=(4, 83, 487, 165), sub=(96, 173, 390, 200))
+ART_ERASE = ((360, 0, 492, 26),)             # the cap and ball that overlap the first line
+ART_WORDS = ((0, 109, 2), (109, 372, 6), (372, 483, 2))    # line 2: x start, x end, palette
+# how each class becomes a palette index, per palette
+ART_INK = {2: {BLACK: 3, RED: 9, BLUE: 9, GREEN: 9},
+           6: {BLACK: 1, GREEN: 10, BLUE: 10, RED: 10},
+           7: {BLACK: 3, BLUE: 11, GREEN: 11, RED: 11}}
+
+
+def art_classes():
+    """(class per pixel, background mask) of the drawing; needs Pillow and numpy."""
+    from PIL import Image, ImageFilter
+    import numpy as np
+    im = Image.open(ART).convert("RGB").filter(ImageFilter.MedianFilter(3))
+    a = np.array(im).astype(int)
+    ref = np.array(ART_REF)
+    cls = ((a[:, :, None, :] - ref[None, None, :, :]) ** 2).sum(axis=3).argmin(axis=2)
+    cls[cls > RED] = BLACK                       # antialiased edges join the outline
+    for x0, y0, x1, y1 in ART_ERASE:
+        cls[y0:y1, x0:x1] = WHITE
+    return cls, cls == WHITE                     # the white paper is the transparent background
+
+
+def art_block(cls, bg, box, size, ink):
+    """Palette values for one block.
+
+    Each class is resampled on its own and then applied in priority order, so the one pixel
+    outlines survive the reduction instead of being outvoted by the fill they surround."""
+    import numpy as np
+    from PIL import Image
+    x0, y0, x1, y1 = box
+    w, h = size
+    sub, subbg = cls[y0:y1, x0:x1], bg[y0:y1, x0:x1]
+    cover = {}
+    for k in ink:
+        m = ((sub == k) & ~subbg).astype("uint8") * 255
+        cover[k] = np.array(Image.fromarray(m).resize((w, h), Image.BOX)).astype(float) / 255
+    out = np.zeros((h, w), int)
+    for k, floor in ((BLACK, 0.30), (BLUE, 0.25), (GREEN, 0.25), (RED, 0.25)):
+        if k not in cover:
+            continue
+        take = (out == 0) & (cover[k] >= floor)
+        out[take] = ink[k]
+    return out.tolist()
 
 BLANK_TILE = 0x247
 PAL_ATTR = {2: 0x2800, 6: 0x3800, 7: 0x3C00}
@@ -74,21 +128,27 @@ def place(canvas, block, x0):
 
 
 # Each block: the screen cells it covers and the words in it (x offset in the canvas, palette).
-LINE1 = dict(name="line1", cols=15, rows=4, col=9, row=7, base=0xA0, second=None,
-             words=[("다운타운", 8, 7)], height=30)
-LINE2 = dict(name="line2", cols=26, rows=5, col=3, row=11, base=0x00, second=0x50,
-             words=[("열혈", 8, 2), ("야구", 72, 6), ("이야기", 136, 2)], height=38)
-SUB = dict(name="sub", cols=19, rows=2, col=7, row=17, base=0xE0, second=0x5A,
-           words=[("야구로 승부다! 쿠니오군", None, 7)], height=16, style=(3, 1, 1))
+LINE1 = dict(name="line1", cols=15, rows=4, col=9, row=7, base=0xA0, second=None, pal=7)
+LINE2 = dict(name="line2", cols=26, rows=5, col=3, row=11, base=0x00, second=0x50, pal=2,
+             words=ART_WORDS)
+SUB = dict(name="sub", cols=19, rows=2, col=7, row=17, base=0xE0, second=0x5A, pal=7,
+           text="야구로 승부다! 쿠니오군", style=(3, 1, 1))
 BLOCKS = (LINE1, LINE2, SUB)
 LETTER_W = 24
+
+
+# Tile 0x47 of this sheet is the blank tile that every other cell of the title screen points at,
+# so drawing on it stripes the whole screen: those cells borrow a tile nothing else uses.
+SHARED_TILES = {0x47: 0x9A}
 
 
 def line_tile(block, r, c):
     """Buffer tile number of cell (r, c) of a block; wide blocks wrap into a second tile range."""
     if c < 16 or block["second"] is None:
-        return block["base"] + r * 16 + c
-    return block["second"] + r * 16 + (c - 16)
+        t = block["base"] + r * 16 + c
+    else:
+        t = block["second"] + r * 16 + (c - 16)
+    return SHARED_TILES.get(t, t)
 
 
 def proportional_ink(text, width, height):
@@ -109,32 +169,34 @@ def proportional_ink(text, width, height):
     return ink
 
 
-def canvas(block):
-    """(palette per canvas cell column, canvas of 4bpp values) for one block."""
+def canvas(block, art=None):
+    """(palette per canvas cell column, canvas of 4bpp values) traced from the drawing."""
     width, height = block["cols"] * 8, block["rows"] * 8
+    if block.get("text"):                # too small to trace: set in the pixel font instead
+        vals = styled(proportional_ink(block["text"], width, height), block["pal"],
+                      block.get("style"))
+        return [block["pal"]] * block["cols"], vals
+    cls, bg = art if art else art_classes()
+    x0, y0, x1, y1 = ART_BOXES[block["name"]]
     out = [[0] * width for _ in range(height)]
-    pal_col = [block["words"][0][2]] * block["cols"]
-    top = (height - block["height"]) // 2
-    for text, x0, pal in block["words"]:
-        if x0 is None:
-            ink = proportional_ink(text, width, block["height"])
-            block_x = 0
-        else:
-            ink = word_ink(text, LETTER_W, block["height"])
-            block_x = x0
-        vals = styled(ink, pal, block.get("style"))
+    pal_col = [block["pal"]] * block["cols"]
+    for sx0, sx1, pal in block.get("words") or ((0, x1 - x0, block["pal"]),):
+        cell0 = round(sx0 * width / (x1 - x0) / 8)
+        cell1 = round(sx1 * width / (x1 - x0) / 8)
+        vals = art_block(cls, bg, (x0 + sx0, y0, x0 + sx1, y1), ((cell1 - cell0) * 8, height),
+                         block.get("ink") or ART_INK[pal])
+        for c in range(cell0, min(cell1, block["cols"])):
+            pal_col[c] = pal
         for y, row in enumerate(vals):
             for x, v in enumerate(row):
-                if v and block_x + x < width:
-                    out[top + y][block_x + x] = v
-        for c in range((block_x) // 8, min(block["cols"], (block_x + len(ink[0]) + 7) // 8)):
-            pal_col[c] = pal
+                if v and cell0 * 8 + x < width:
+                    out[y][cell0 * 8 + x] = v
     return pal_col, out
 
 
-def tiles_and_map(block):
+def tiles_and_map(block, art=None):
     """({tile number: 32 bytes}, {tilemap word offset: word}) for one block."""
-    pal_col, cv = canvas(block)
+    pal_col, cv = canvas(block, art)
     tiles, tmap = {}, {}
     for r in range(block["rows"]):
         for c in range(block["cols"]):
@@ -223,8 +285,9 @@ def gameover():
 def build():
     """(tile number -> 32 bytes, tilemap word offset -> word) for the whole logo."""
     tiles, tmap = {}, {}
+    art = art_classes()
     for block in BLOCKS:
-        t, m = tiles_and_map(block)
+        t, m = tiles_and_map(block, art)
         tiles.update(t)
         tmap.update(m)
     return tiles, tmap
