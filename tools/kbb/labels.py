@@ -29,6 +29,7 @@ COUNTED_LISTS = [(0x08C986, 21)]
 # practice-match team grid ($91:C48B): 13 records of [name_x, y, level_x, y+1, 4 top words, 4 bottom words],
 # drawn with the row writer (n = 4); their labels use the 8px font (see build.NARROW_PREFIX)
 GRID_RECORDS = (0x08C48B, 13)
+GRID_CELLS = 6                            # widened from the original 4 so 4 syllables fit (see build)
 # (pointer table, entry count, n): labels copied by the MVN writer $90:CA94; each pointer is a block of
 # n top words followed by n bottom words (the stat labels of the next-opponent screen)
 MVN_TABLES = [(0x0820D1, 14, 6)]
@@ -214,7 +215,7 @@ def extract(rom):
         top, bot = struct.unpack_from("<4H", rom, off + 8), struct.unpack_from("<4H", rom, off + 16)
         addr = 0x8000 + off % 0x8000
         rows.append({"id": "grid_%02d" % k, "bank": "%02X" % bank, "top": "%04X" % (addr + 8),
-                     "bottom": "%04X" % (addr + 16), "n": 4, "x": x, "y": y,
+                     "bottom": "%04X" % (addr + 16), "n": GRID_CELLS, "x": x, "y": y,
                      "japanese": decode_rows(top, bot), "korean": ""})
     for table_off, count, n in MVN_TABLES:
         bank = table_off // 0x8000

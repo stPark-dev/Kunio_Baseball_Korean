@@ -454,14 +454,10 @@ label_width:
         cmp #$00F0
         beq @skip2
         jsr get_index
-        ldx z_mode
-        bne @w8
         tax
         lda f:WIDTHS,x
         and #$00FF
-        bra @add
-@w8:    lda #8
-@add:   clc
+        clc
         adc z_pen
         sta z_pen
         bra @ch
@@ -687,70 +683,6 @@ blit_glyph:
         lda z_pen
         clc
         adc z_w
-        sta z_pen
-        sec
-        rts
-
-; 8px-font glyph A at z_pen: the 8x8 tile's plane 0 (GLYPH8) is drawn on rows 4..11 of the cell.
-blit8:
-        sta z_idx
-        lda z_pen
-        clc
-        adc #8
-        cmp z_maxpx
-        bcc @fits
-        beq @fits
-        clc
-        rts
-@fits:  lda z_idx
-        asl
-        asl
-        asl
-        asl
-        clc
-        adc #.loword(GLYPH8)
-        sta z_ptr
-        sep #$20
-        lda #^GLYPH8
-        sta z_ptr+2
-        rep #$20
-        lda z_pen
-        and #$0007
-        sta z_shift
-        lda z_pen
-        lsr
-        lsr
-        lsr
-        sta z_col
-        lda #0
-        ldx z_col
-        beq @mul_done
-        clc
-@mul:   adc z_stride
-        dex
-        bne @mul
-@mul_done:
-        clc
-        adc z_base
-        sta z_dst
-        lda #4
-        sta z_row
-@row:   lda z_row
-        sec
-        sbc #4
-        asl
-        tay
-        lda [z_ptr],y
-        and #$00FF
-        xba                     ; row bits in the high byte, like a 16px glyph row
-        jsr plot_row
-        inc z_row
-        lda z_row
-        cmp #12
-        bne @row
-        lda z_pen
-        clc
-        adc #8
         sta z_pen
         sec
         rts
@@ -1222,7 +1154,7 @@ label_paint:
         jsr label_width         ; also sets z_mode from the string's prefix
         ldx z_mode
         beq @left
-        sta z_tmp               ; 8px labels are centred in their cells
+        sta z_tmp               ; centred labels start half the slack in
         lda z_maxpx
         sec
         sbc z_tmp
@@ -1257,12 +1189,8 @@ label_paint:
         beq @skip2
         jsr get_index
         phy
-        ldx z_mode
-        bne @g8
         jsr blit_glyph
-        bra @gd
-@g8:    jsr blit8
-@gd:    ply
+        ply
         bra @ch
 @sp:    lda z_pen
         clc

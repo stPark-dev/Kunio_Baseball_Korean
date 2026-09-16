@@ -16,6 +16,7 @@ import sys
 import tempfile
 
 from tools.kbb import bg2, encode, font8, glyphs, ingame, rows8, script, sprtext, static8, text, titlecard
+from tools.kbb import labels
 from tools.kbb import labels as L
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -47,7 +48,9 @@ MVN_HOOK_ROM = 0x084A94                      # $90:CA94, MVN row copier (X = ROM
 MAPLABEL_ROM = 0x1A6000                      # $B4:E000: labels inside compressed tilemaps (offset, word, n, id)
 LABELSITE_ROM = 0x1A6800                     # $B4:E800: (bank, address) -> label id of every translated row
 LABELSITE_LIMIT = 0x1800
-NARROW_PREFIX = "grid_"                      # labels drawn with the 8px font (team grid cells are 32px wide)
+CENTRE_PREFIX = "grid_"                      # labels centred in their cells (the team grid)
+GRID_N_SITES = (0x08C215, 0x08C238)          # PEA #4 operands: cells per team-name row in $91:C202
+GRID_TABLE, GRID_COUNT, GRID_RECORD = 0x08C48B, 13, 24
 TABLE_LIST = ("surname", "name_extra1", "name_extra2", "name_set3", "name_set4", "name_set5", "item")
 MENU_POOL = [t for t in range(256) if t & 0xF in (0x9, 0xA, 0xB, 0xD, 0xE, 0xF) and t != 0x0D]
 ASM_SOURCE = os.path.join(ROOT, "tools", "kbb", "asm", "text.s")
@@ -68,7 +71,7 @@ GAME_TEXT = True
 LABEL_TABLE_ROM = CODE_ROM + 0x4000          # $B1:C000, u16 string offsets then strings
 RESERVED_ROM = CODE_ROM + 0x3F00             # $B1:BF00, 64-byte bitmap of kanji tiles to keep
 # 16x16 glyphs drawn by screens whose data is not located yet (versus title, pre-game menu)
-RESERVED_GLYPHS = "熱血野球大会対先発火小変更打順守備選手デタ自敵チム第回戦交代使用"
+RESERVED_GLYPHS = "熱血野球大会対先発火小変更打順守備選手デタ自敵チム第回戦交代使用野次気合"
 # glyph indices the reading table cannot name: 8x16 digit pairs 01..89, ［ ］ !, ・ (the "." of .225),
 # 野次気合 / アイテム of the time-out menu (see kanji16.KOREAN16_IDX)
 RESERVED_INDICES = (0x57, 0x5F, 0x67, 0x6F, 0x77, 0x7B, 0x49, 0x41, 0x42, 0x43, 0x44, 0x07, 0x47, 0x4F)
@@ -199,13 +202,28 @@ def label_table(rows, gs):
     base = 0xC000 + 2 * len(rows)
     for r in rows:
         ptrs += struct.pack("<H", base + len(strings))
-        if r["id"].startswith(NARROW_PREFIX):
-            strings += b"\x01"                      # 8px-font label (asm: label_width / label_paint)
+        if r["id"].startswith(CENTRE_PREFIX):
+            strings += b"\x01"                      # centre in the cells (asm: label_width / label_paint)
         strings += gs.encode(r["korean"].replace("\n", " "))
     data = bytes(ptrs + strings)
     if len(data) > LABEL_TABLE_LIMIT:
         raise BuildError("label table overflow")
     return data
+
+
+def widen_grid(rom):
+    """Give each practice-match team name 6 cells instead of 4 and move its level marker right.
+
+    Two kanji fit in 32px, four Hangul syllables need 48, so the row writer's cell count and the
+    level marker's column (record word 2) both move by two cells; the columns are 10 apart."""
+    for site in GRID_N_SITES:
+        if rom[site] != 4:
+            raise BuildError("unexpected team-grid cell count at %06X" % site)
+        rom[site] = labels.GRID_CELLS
+    for k in range(GRID_COUNT):
+        off = GRID_TABLE + GRID_RECORD * k
+        name_x = struct.unpack_from("<H", rom, off)[0]
+        struct.pack_into("<H", rom, off + 4, name_x + labels.GRID_CELLS)
 
 
 def label_sites(rows):
@@ -358,10 +376,7 @@ def build(original, csv_path=None, labels_csv=None, ingame_csv=None, bg2_csv=Non
     if GLYPH_ROM + len(bitmaps) > ROM_SIZE:
         raise BuildError("glyph bitmaps do not fit")
     for r in label_rows:
-        if r["id"].startswith(NARROW_PREFIX):
-            px = 8 * len(r["korean"])
-        else:
-            px = sum(width_of.get(c, 12) if c != " " else encode.SPACE_W for c in r["korean"])
+        px = sum(width_of.get(c, 12) if c != " " else encode.SPACE_W for c in r["korean"])
         if px > int(r["n"]) * 8:
             log("label too wide (%dpx > %dpx): %s %s" % (px, int(r["n"]) * 8, r["id"], r["korean"]))
     code = assemble([("SURNAME_TABLE", table_addr["surname"]), ("ITEM_TABLE", table_addr["item"]),
@@ -399,6 +414,8 @@ def build(original, csv_path=None, labels_csv=None, ingame_csv=None, bg2_csv=Non
     rom[LABEL_TABLE_ROM:LABEL_TABLE_ROM + len(ltab)] = ltab
     bg2.apply(rom, load_ingame(bg2_csv), log)
     rom[RESERVED_ROM:RESERVED_ROM + 64] = reserved_bitmap(original, L.extract(original), label_rows)
+    if any(r["id"].startswith(CENTRE_PREFIX) for r in label_rows):
+        widen_grid(rom)
     stab = label_sites(label_rows)
     rom[LABELSITE_ROM:LABELSITE_ROM + len(stab)] = stab
     mtab = maplabel_table(original, label_rows)

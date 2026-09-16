@@ -104,7 +104,7 @@ def test_label_kinds_grid_mvn_map(monkeypatch):
     rows = {r["id"]: r for r in labels.extract(bytes(rom))}
     g = rows["grid_00"]
     assert (g["bank"], g["top"], g["bottom"], g["n"], g["x"], g["y"], g["japanese"]) == \
-        ("11", "%04X" % (0x8000 + table % 0x8000 + 8), "%04X" % (0x8000 + table % 0x8000 + 16), 4, 14, 8, "花園")
+        ("11", "%04X" % (0x8000 + table % 0x8000 + 8), "%04X" % (0x8000 + table % 0x8000 + 16), labels.GRID_CELLS, 14, 8, "花園")
     m = rows["mvn_0820D0_00"]
     assert (m["bank"], m["top"], m["bottom"], m["n"], m["japanese"]) == ("10", "A105", "A10B", 3, "打")
     t = rows["map_93B7BC_01C8"]
