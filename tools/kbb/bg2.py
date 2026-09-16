@@ -6,13 +6,17 @@ OUT counter) at the same tile numbers. Text is drawn three ways:
 
 - glyph:   a 16x16 kanji redrawn in place (team abbreviation, 表, 裏), in both sets.
 - half:    an 8x16 syllable (the inning counter's 回); `target` lists one or more top,bottom pairs.
-- blank:   tiles wiped clean, for the parts of a replaced image that nothing draws any more.
+- blank:   tiles wiped to the set's own background, for the parts of a replaced image that
+           nothing draws any more (set B's scoreboard is black, not transparent).
 - copy:    a tile duplicated into a second slot ("src>dst"), for images the game stores twice.
 - overlay: a stats-overlay label row pair (`$85:F9D2`...: 8 words per row, label in the first
            4-5 columns, digits after). Redrawn with the 8px font stretched to 8x16 like the
            digits, one column per syllable, and the row words repointed. Same tiles in both sets.
 - banner:  a 2x8-word image (`$8E:FC72`... records, `$8E:FE14`... headerless). Redrawn with
            Galmuri11, one word per column-aligned span so words such as 볼/게임 share tiles.
+- result:  the match result line (`1P. 勝ち!` / `COM. 負け!!`). Not BG2 at all but the sprite
+           sheet at `$94:D400`, uncompressed; each kanji is redrawn as one Hangul syllable in
+           the two tile columns it already owned.
 
 New tiles come from the tiles the replaced images used to reference, per set."""
 import struct
@@ -20,6 +24,9 @@ import struct
 from tools.kbb import font8, glyphs
 
 TILESETS = {"A": 0x0E6000, "B": 0x0C8000}
+RESULT_SHEET = 0x0A5400                        # $94:D400: uncompressed 4bpp sprite tiles, the
+RESULT_FIRST = 0x2A0                           # first of which the result screen sees as 0x2A0
+RESULT_INK = (1, 13)                           # rows the sheet's own glyphs draw between
 BACKGROUND = {"A": 0, "B": 2}                  # scoreboard tiles: transparent in A, black in B
 BLANK_TILE = 0x08
 BLANK_WORD = 0x2008
@@ -158,6 +165,50 @@ def half_tiles(ch):
     return slice_tiles(kanji_style(ink))
 
 
+def result_word(rom, first, text):
+    """{tile number: 32 bytes} for one result-screen word drawn over the kanji it replaces.
+
+    The fill is a vertical gradient and the two words use different ones (the screen tints
+    1P. and COM. apart), so the colour of every row and the colour of the outline are read
+    back from the tiles being overwritten instead of being spelled out here."""
+    cols = 2 * len(text)
+    was = [[0] * (cols * 8) for _ in range(16)]
+    for half in (0, 1):
+        for c in range(cols):
+            rows = decode_tile(rom, RESULT_SHEET + (first + half * 0x10 + c - RESULT_FIRST) * 32)
+            for y, row in enumerate(rows):
+                was[half * 8 + y][c * 8:c * 8 + 8] = row
+    edge = [v for v in was[0] if v]
+    outline = max(set(edge), key=edge.count)
+    gradient = []
+    for row in was:
+        fill = [v for v in row if v and v != outline]
+        gradient.append(max(set(fill), key=fill.count) if fill else outline)
+
+    top, bottom = RESULT_INK
+    height = bottom - top + 1
+    ink = [[0] * (cols * 8) for _ in range(16)]
+    for i, ch in enumerate(text):
+        dw, cell = ink16(ch)
+        shift = (16 - dw) // 2
+        for y in range(height):
+            src = cell[y * 16 // height]
+            for x in range(16 - shift):
+                if src[x]:
+                    ink[top + y][i * 16 + shift + x] = 1
+    out = [[gradient[y] if ink[y][x] else 0 for x in range(cols * 8)] for y in range(16)]
+    for y in range(16):
+        for x in range(cols * 8):
+            if out[y][x]:
+                continue
+            if any(ink[y + dy][x + dx] for dy in (-1, 0, 1) for dx in (-1, 0, 1)
+                   if 0 <= y + dy < 16 and 0 <= x + dx < cols * 8):
+                out[y][x] = outline
+    return {first + half * 0x10 + c:
+            encode_tile([r[c * 8:c * 8 + 8] for r in out[half * 8:half * 8 + 8]])
+            for half in (0, 1) for c in range(cols)}
+
+
 def overlay_tiles(text):
     """Stats label: one 8x16 column per syllable (Galmuri7 stretched 2x vertically)."""
     if len(text) > OVERLAY_COLS:
@@ -203,6 +254,11 @@ def apply(rom, rows, log=print):
     """Draw every translated row of translations/bg2.csv into `rom` (bytearray, in place)."""
     todo = [r for r in rows if r.get("korean")]
     for r in todo:
+        if r["kind"] == "result":                   # match result line, on the sprite sheet
+            for t, data in result_word(rom, int(r["target"], 16), r["korean"]).items():
+                off = RESULT_SHEET + (t - RESULT_FIRST) * 32
+                rom[off:off + 32] = data
+            continue
         if r["kind"] == "copy":                     # second copy of a tile (see inning_kai_dup)
             for pair in r["target"].split(","):
                 src, dst = (int(t, 16) for t in pair.split(">"))
@@ -211,8 +267,9 @@ def apply(rom, rows, log=print):
             continue
         if r["kind"] == "blank":                    # leftovers of a replaced image (see inning_tail)
             for t in (int(t, 16) for t in r["target"].split(",")):
-                for base in TILESETS.values():
-                    rom[base + t * 32:base + t * 32 + 32] = bytes(32)
+                for key, base in TILESETS.items():   # colour 0 is transparent: in set B the
+                    rom[base + t * 32:base + t * 32 + 32] = (   # infield would show through
+                        with_background(bytes(32), BACKGROUND[key]))
             continue
         if r["kind"] == "half":                     # 8x16 syllable, drawn into every listed pair
             data = half_tiles(r["korean"])

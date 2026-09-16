@@ -34,6 +34,7 @@ INGAME_FONT_SITE = 0x0067D9                  # source address bytes of the in-ga
 # cmd 06 descriptors "06 bank size16 src16 vram16" that load the 8x8 font to VRAM $C000 during matches
 INGAME_FONT_SITES06 = (0x000E57, 0x0016B4, 0x0017FE, 0x00190E)
 POOL8_ROM = CODE_ROM + 0x3E00                # $B1:BE00: u16 count, then dynamic 8x8 slot numbers
+POOL8_LIMIT = (0x9B0A - 0x9A80) // 2         # D_MAP entries before asm/text.s puts G_PEND
 MPOOL_ROM = CODE_ROM + 0x3E80                # $B1:BE80: u16 count, then menu font slots for roster names
 SHIFT_ROM = CODE_ROM + 0x3D00                # $B1:BD00: 8 x 4-byte pointers, then the shift strings
 TABLE_LIST_ROM = CODE_ROM + 0x3D80           # $B1:BD80: the lineup task's 7 table addresses (new bank)
@@ -434,6 +435,9 @@ def build(original, csv_path=None, labels_csv=None, ingame_csv=None, bg2_csv=Non
         for r in ingame_rows:
             if r.get("korean"):
                 ingame.encode_record(rom, int(r["offset"], 16), r["korean"], static)
+        if len(pool) > POOL8_LIMIT:
+            raise BuildError("dynamic 8x8 pool (%d slots) overruns D_MAP into the parked-cell ring"
+                             % len(pool))
         rom[POOL8_ROM:POOL8_ROM + 2 + len(pool)] = struct.pack("<H", len(pool)) + bytes(pool)
         rom[MPOOL_ROM:MPOOL_ROM + 2 + len(MENU_POOL)] = struct.pack("<H", len(MENU_POOL)) + bytes(MENU_POOL)
         rom[TABLE_LIST_ROM:TABLE_LIST_ROM + 14] = struct.pack("<7H", *(table_addr[k] for k in TABLE_LIST))

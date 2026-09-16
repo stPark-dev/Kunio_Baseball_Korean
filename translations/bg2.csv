@@ -39,3 +39,5 @@ banner_B_02,banner,B,077E54,セーフ,세이프
 banner_B_03,banner,B,077E74,ファール,파울
 banner_B_04,banner,B,077E94,チェンジ,체인지
 banner_B_05,banner,B,077EB4,ホームラン,홈런
+result_win,result,,2c0,勝ち,승리
+result_lose,result,,2c5,負け,패배

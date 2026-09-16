@@ -6,3 +6,8 @@
 build/
 __pycache__/
 *.pyc
+
+# 검수용 작업 파일 (스크린샷, 메모리 덤프)
+image/
+image.png
+dump/

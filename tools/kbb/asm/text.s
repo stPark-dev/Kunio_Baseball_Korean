@@ -79,10 +79,23 @@ G_COL   = GST+6                 ; cells used on the current line
 D_NEXT  = GST+8                 ; next dynamic 8x8 slot to reuse
 D_TMP   = GST+10
 D_ID    = GST+12
+G_QFULL = GST+16                ; diagnostics: cells the VRAM queue had no room for
+G_RLOST = GST+18                ; diagnostics: glyph uploads the tile ring had no room for
 GAME_COLS = 22
 GAME_LINE2 = $3F                ; second line starts at base + $3F (as the original)
 HUD_NAME_CONT = $0EF805         ; after the name cells are built
 HUD_CELLS = 5                   ; cells queued per name
+; A cell the VRAM queue has no room for is parked here, with its own slot as the DMA source,
+; and retried on the next character step - a frame later, with the queue drained. Waiting for
+; room instead is what froze the game in v0.6.4: the task switcher pops only its own three
+; words and then insists the stack is back at $1FFF, so nothing below the top of a task may
+; yield. Dropping the cell outright, which is what v0.6.4 did, swallowed a syllable now and
+; then ("공격입니다" came out as "공격_니다").
+G_PEND   = $7E9B0A              ; PEND_N entries of (u16 VRAM word address, u16 cell word)
+PEND_N   = 4                    ; a character step queues at most two cells
+G_PHEAD  = $7E9B1A              ; entry to retry next
+G_PTAIL  = $7E9B1C              ; first free entry
+G_PLOST  = $7E9B1E              ; cells lost anyway, because the ring was full too
 G_CELLWORD = $7E6921            ; the original's cell word for the VRAM queue
 G_BLANK    = $7E8C1E            ; constant blank cell word ($2002): the queue DMAs later, so a
                                 ; space queued in the same frame as a glyph needs its own source
@@ -1386,6 +1399,9 @@ ring_push_rom:
         dec
         sta f:z_spill+Z+$7E0000
         bne @wait
+        lda f:G_RLOST
+        inc
+        sta f:G_RLOST
         rts
 @room:  sta f:z_shift+Z+$7E0000
         lda f:R_TAIL
@@ -1470,9 +1486,95 @@ kbb_game_start:
         sta f:LINE
         sta f:G_DROP
         sta f:G_COL
+        sta f:G_PHEAD           ; nothing carried over from the previous message
+        sta f:G_PTAIL
         lda f:G_CELL
         sta f:G_BASE
         jml GAME_MAIN_HEAD
+
+; X = source address in $7E, Y = VRAM word address. Carry set = the queue had no room.
+; Clobbers A and X, as the queue routine itself does.
+pend_queue:
+        phb
+        pea $7E7E
+        plb
+        plb
+        lda #2
+        jsl VRAM_QUEUE
+        plb
+        rts
+
+; Retry parked cells, oldest first; stops at the first one the queue still turns away.
+game_pend_flush:
+        pha
+        phx
+        phy
+        lda f:G_PHEAD
+        cmp #PEND_N
+        bcs @reset
+        lda f:G_PTAIL
+        cmp #PEND_N
+        bcc @loop
+@reset: lda #0                  ; indices out of range (uninitialised WRAM): start empty
+        sta f:G_PHEAD
+        sta f:G_PTAIL
+        bra @done
+@loop:  lda f:G_PHEAD
+        cmp f:G_PTAIL
+        beq @done
+        asl
+        asl
+        tax
+        lda f:G_PEND,x
+        tay                     ; Y = the VRAM word this cell belongs at
+        txa
+        clc
+        adc #.loword(G_PEND)+2
+        tax                     ; X = the parked word, which is its own DMA source
+        jsr pend_queue
+        bcs @done
+        lda f:G_PHEAD
+        inc
+        and #PEND_N-1
+        sta f:G_PHEAD
+        bra @loop
+@done:  ply
+        plx
+        pla
+        rts
+
+; Park the cell at source X (bank $7E) for VRAM word G_CELL. Clobbers X.
+game_pend_add:
+        pha
+        phy
+        lda f:G_QFULL
+        inc
+        sta f:G_QFULL
+        lda f:$7E0000,x
+        tay                     ; the word itself; the ring slot becomes its DMA source
+        lda f:G_PTAIL
+        inc
+        and #PEND_N-1
+        cmp f:G_PHEAD
+        beq @lost
+        pha
+        lda f:G_PTAIL
+        asl
+        asl
+        tax
+        lda f:G_CELL
+        sta f:G_PEND,x
+        tya
+        sta f:G_PEND+2,x
+        pla
+        sta f:G_PTAIL
+        bra @done
+@lost:  lda f:G_PLOST           ; PEND_N cells behind and still no room: now it is really lost
+        inc
+        sta f:G_PLOST
+@done:  ply
+        pla
+        rts
 
 ; write cell word A at G_CELL through the queue, then G_CELL++ / G_COL++
 game_put_cell:
@@ -1480,18 +1582,20 @@ game_put_cell:
         ldx #.loword(G_CELLWORD)
 game_put_from:                  ; X = WRAM address of the cell word
         phx
-        phb
-        pea $7E7E
-        plb
-        plb
+        jsr game_pend_flush     ; anything parked earlier goes first, so the row keeps its order
+        lda f:G_PHEAD
+        cmp f:G_PTAIL
+        bne @park               ; cells are still waiting: this one queues behind them
         lda f:G_CELL
         tay
-        lda 2,s
+        lda 1,s
         tax
-        lda #2
-        jsl VRAM_QUEUE          ; carry set = queue full: the cell is dropped, never waited for.
-        plb                     ; The task switcher pops only its own frame and wants the stack
-        plx                     ; back at $1FFF, so yielding from here would corrupt it.
+        jsr pend_queue
+        bcc @done
+@park:  lda 1,s
+        tax
+        jsr game_pend_add
+@done:  plx
         lda f:G_CELL
         inc
         sta f:G_CELL
@@ -1572,7 +1676,8 @@ game_glyph:
 
 ; Main string step: replaces LDA $7E6933 at $04:CC37.
 kbb_game_main:
-        pea SCRIPT_BANK*256+SCRIPT_BANK
+        jsr game_pend_flush     ; a frame has passed, so a cell parked by the previous character
+        pea SCRIPT_BANK*256+SCRIPT_BANK     ; - the last one of the message included - retries here
         plb
         plb
         lda f:G_PTR

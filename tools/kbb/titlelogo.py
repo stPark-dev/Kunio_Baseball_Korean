@@ -9,6 +9,11 @@ placed by the BG2 tilemap (`$93:9260` -> `$7F:8800`). Three text blocks sit in i
 
 Both the tiles and those tilemap rows are replaced at run time (see `kbb_sheet2`), so the
 drawing here only has to produce the same tile numbers in the same cells.
+
+Only the letter shapes come from `assets/title_logo.png`. The colouring is the original logo's
+own, measured off the Japanese title screen: every palette holds a vertical gradient and one or
+two outline colours, and `styled` puts each word back together that way, so the Korean logo
+belongs to the screen it sits on instead of looking like a shrunk drawing.
 """
 import os
 import struct
@@ -17,61 +22,52 @@ from tools.kbb import glyphs
 
 ART = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
                    "assets", "title_logo.png")
-# the drawing's own colours: background/outline white, black, blue, green, red, then two greys
-# that the antialiased edges fall into and that we fold into the black outline
-ART_REF = ((224, 224, 224), (20, 20, 20), (64, 96, 224), (128, 176, 32), (192, 32, 16),
-           (128, 128, 128), (176, 176, 176))
-WHITE, BLACK, BLUE, GREEN, RED = 0, 1, 2, 3, 4
-# source boxes of the three blocks, measured on the drawing
-ART_BOXES = dict(line1=(110, 0, 395, 78), line2=(4, 83, 487, 165), sub=(96, 173, 390, 200))
-ART_ERASE = ((360, 0, 492, 26),)             # the cap and ball that overlap the first line
-ART_WORDS = ((0, 109, 2), (109, 372, 6), (372, 483, 2))    # line 2: x start, x end, palette
-# how each class becomes a palette index, per palette
-ART_INK = {2: {BLACK: 3, RED: 9, BLUE: 9, GREEN: 9},
-           6: {BLACK: 1, GREEN: 10, BLUE: 10, RED: 10},
-           7: {BLACK: 3, BLUE: 11, GREEN: 11, RED: 11}}
+ART_ALPHA = 200                              # the drawing is transparent around the letters
+# Where each word sits in the drawing, and the cells of its block it fills. The two red words
+# keep the cells the sprite copy expects (see SPRITE_ORDER), so their spans cannot move.
+ART_WORDS = {
+    "line1": (((435, 113, 1462, 375), 0, 15, 7),),
+    "line2": (((43, 396, 427, 717), 0, 6, 2),
+              ((448, 396, 1435, 717), 6, 20, 6),
+              ((1455, 396, 1856, 717), 20, 26, 2)),
+}
 
 
-def art_classes():
-    """(class per pixel, background mask) of the drawing; needs Pillow and numpy."""
+def art_ink():
+    """The drawing's letter bodies as one boolean mask.
+
+    Only the coloured fill is traced. The white halo and the black keyline the drawing puts
+    around it are not part of the shape: the logo gets its outline from `styled` instead, in
+    the colours the title screen's palettes actually hold."""
+    from PIL import Image
+    import numpy as np
+    a = np.array(Image.open(ART).convert("RGBA")).astype(int)
+    r, g, b, alpha = (a[:, :, i] for i in range(4))
+    grey = (abs(r - g) < 45) & (abs(g - b) < 45) & (abs(r - b) < 45)
+    return (alpha > ART_ALPHA) & ~grey
+
+
+def word_shape(ink, box, width, height):
+    """`box` of the drawing as a width x height boolean shape.
+
+    The drawing is about ten times the size it ends up at, and plain area coverage closes the
+    gaps between strokes on the way down, which turns 열혈 into two solid blocks. Taking half a
+    destination pixel off the shape first keeps them open."""
     from PIL import Image, ImageFilter
     import numpy as np
-    im = Image.open(ART).convert("RGB").filter(ImageFilter.MedianFilter(3))
-    a = np.array(im).astype(int)
-    ref = np.array(ART_REF)
-    cls = ((a[:, :, None, :] - ref[None, None, :, :]) ** 2).sum(axis=3).argmin(axis=2)
-    cls[cls > RED] = BLACK                       # antialiased edges join the outline
-    for x0, y0, x1, y1 in ART_ERASE:
-        cls[y0:y1, x0:x1] = WHITE
-    return cls, cls == WHITE                     # the white paper is the transparent background
-
-
-def art_block(cls, bg, box, size, ink):
-    """Palette values for one block.
-
-    Each class is resampled on its own and then applied in priority order, so the one pixel
-    outlines survive the reduction instead of being outvoted by the fill they surround."""
-    import numpy as np
-    from PIL import Image
     x0, y0, x1, y1 = box
-    w, h = size
-    sub, subbg = cls[y0:y1, x0:x1], bg[y0:y1, x0:x1]
-    cover = {}
-    for k in ink:
-        m = ((sub == k) & ~subbg).astype("uint8") * 255
-        cover[k] = np.array(Image.fromarray(m).resize((w, h), Image.BOX)).astype(float) / 255
-    out = np.zeros((h, w), int)
-    for k, floor in ((BLACK, 0.30), (BLUE, 0.25), (GREEN, 0.25), (RED, 0.25)):
-        if k not in cover:
-            continue
-        take = (out == 0) & (cover[k] >= floor)
-        out[take] = ink[k]
-    return out.tolist()
+    img = Image.fromarray((ink[y0:y1, x0:x1] * 255).astype("uint8"))
+    shrink = round(0.5 * (x1 - x0) / width)
+    if shrink:
+        img = img.filter(ImageFilter.MinFilter(2 * shrink + 1))
+    return np.array(img.resize((width, height), Image.BOX)) >= 128
+
 
 BLANK_TILE = 0x247
 PAL_ATTR = {2: 0x2800, 6: 0x3800, 7: 0x3C00}
-# palette index of the outline and of the top and bottom of the vertical fill gradient
-STYLE = {2: (3, 5, 9), 6: (1, 5, 14), 7: (1, 5, 15)}
+# (fill at the top, fill at the bottom, outline rings from the letter outwards), read off the
+# original logo: the red words wear white around a black keyline, the other two a single ring.
+STYLE = {2: (9, 5, (3, 1)), 6: (14, 5, (1,)), 7: (5, 15, (1,))}
 
 
 def scaled_glyph(ch, w, h):
@@ -90,51 +86,40 @@ def bolder(ink):
                       for dy in (0, 1) for dx in (0, 1)) else 0 for x in range(w)] for y in range(h)]
 
 
-def word_ink(text, w, h):
-    ink = [[0] * (w * len(text)) for _ in range(h)]
-    for i, ch in enumerate(text):
-        g = bolder(scaled_glyph(ch, w, h))
-        for y in range(h):
-            ink[y][i * w:(i + 1) * w] = g[y]
-    return ink
-
-
 def styled(ink, palette, style=None):
-    """Ink matrix -> 4bpp values: gradient fill with a one pixel outline around it."""
-    outline, lo, hi = style or STYLE[palette]
+    """Ink matrix -> 4bpp values: a vertical gradient inside, outline rings around it."""
+    head, foot, rings = style or STYLE[palette]
     h, w = len(ink), len(ink[0])
     rows = [r for r in range(h) if any(ink[r])]
     top, bot = (rows[0], rows[-1]) if rows else (0, h - 1)
     span = max(1, bot - top)
+    lo, hi = min(head, foot), max(head, foot)
     out = [[0] * w for _ in range(h)]
     for y in range(h):
-        v = lo + round((hi - lo) * (y - top) / span)
+        v = min(max(head + round((foot - head) * (y - top) / span), lo), hi)
         for x in range(w):
             if ink[y][x]:
-                out[y][x] = min(max(v, lo), hi)
-    for y in range(h):
-        for x in range(w):
-            if out[y][x]:
-                continue
-            if any(0 <= y + dy < h and 0 <= x + dx < w and ink[y + dy][x + dx]
-                   for dy in (-1, 0, 1) for dx in (-1, 0, 1)):
-                out[y][x] = outline
+                out[y][x] = v
+    grown = [[1 if v else 0 for v in row] for row in ink]
+    for colour in rings:
+        ring = [[not grown[y][x] and any(grown[y + dy][x + dx]
+                                         for dy in (-1, 0, 1) for dx in (-1, 0, 1)
+                                         if 0 <= y + dy < h and 0 <= x + dx < w)
+                 for x in range(w)] for y in range(h)]
+        for y in range(h):
+            for x in range(w):
+                if ring[y][x]:
+                    out[y][x] = colour
+                    grown[y][x] = 1
     return out
-
-
-def place(canvas, block, x0):
-    for y, row in enumerate(block):
-        canvas[y][x0:x0 + len(row)] = row
 
 
 # Each block: the screen cells it covers and the words in it (x offset in the canvas, palette).
 LINE1 = dict(name="line1", cols=15, rows=4, col=9, row=7, base=0xA0, second=None, pal=7)
-LINE2 = dict(name="line2", cols=26, rows=5, col=3, row=11, base=0x00, second=0x50, pal=2,
-             words=ART_WORDS)
+LINE2 = dict(name="line2", cols=26, rows=5, col=3, row=11, base=0x00, second=0x50, pal=2)
 SUB = dict(name="sub", cols=19, rows=2, col=7, row=17, base=0xE0, second=0x5A, pal=7,
-           text="야구로 승부다! 쿠니오군", style=(3, 1, 1))
+           text="야구로 승부다! 쿠니오군", style=(1, 1, (3,)))
 BLOCKS = (LINE1, LINE2, SUB)
-LETTER_W = 24
 
 
 # Tile 0x47 of this sheet is the blank tile that every other cell of the title screen points at,
@@ -169,34 +154,35 @@ def proportional_ink(text, width, height):
     return ink
 
 
-def canvas(block, art=None):
-    """(palette per canvas cell column, canvas of 4bpp values) traced from the drawing."""
+def canvas(block, ink=None):
+    """(palette per cell column, canvas of 4bpp values) traced from the drawing."""
     width, height = block["cols"] * 8, block["rows"] * 8
     if block.get("text"):                # too small to trace: set in the pixel font instead
-        vals = styled(proportional_ink(block["text"], width, height), block["pal"],
-                      block.get("style"))
-        return [block["pal"]] * block["cols"], vals
-    cls, bg = art if art else art_classes()
-    x0, y0, x1, y1 = ART_BOXES[block["name"]]
+        return ([block["pal"]] * block["cols"],
+                styled(proportional_ink(block["text"], width, height), block["pal"],
+                       block.get("style")))
+    ink = art_ink() if ink is None else ink
     out = [[0] * width for _ in range(height)]
     pal_col = [block["pal"]] * block["cols"]
-    for sx0, sx1, pal in block.get("words") or ((0, x1 - x0, block["pal"]),):
-        cell0 = round(sx0 * width / (x1 - x0) / 8)
-        cell1 = round(sx1 * width / (x1 - x0) / 8)
-        vals = art_block(cls, bg, (x0 + sx0, y0, x0 + sx1, y1), ((cell1 - cell0) * 8, height),
-                         block.get("ink") or ART_INK[pal])
-        for c in range(cell0, min(cell1, block["cols"])):
-            pal_col[c] = pal
-        for y, row in enumerate(vals):
+    for box, cell0, cell1, pal in ART_WORDS[block["name"]]:
+        pad = len(STYLE[pal][2])         # the rings are drawn outside the ink, so leave room
+        cols = (cell1 - cell0) * 8
+        cell = [[0] * cols for _ in range(height)]
+        for y, row in enumerate(word_shape(ink, box, cols - 2 * pad, height - 2 * pad)):
             for x, v in enumerate(row):
-                if v and cell0 * 8 + x < width:
-                    out[y][cell0 * 8 + x] = v
+                if v:
+                    cell[pad + y][pad + x] = 1
+        vals = styled(cell, pal)
+        for c in range(cell0, cell1):
+            pal_col[c] = pal
+        for y in range(height):
+            out[y][cell0 * 8:cell1 * 8] = vals[y]
     return pal_col, out
 
 
-def tiles_and_map(block, art=None):
+def tiles_and_map(block, ink=None):
     """({tile number: 32 bytes}, {tilemap word offset: word}) for one block."""
-    pal_col, cv = canvas(block, art)
+    pal_col, cv = canvas(block, ink)
     tiles, tmap = {}, {}
     for r in range(block["rows"]):
         for c in range(block["cols"]):
@@ -285,9 +271,9 @@ def gameover():
 def build():
     """(tile number -> 32 bytes, tilemap word offset -> word) for the whole logo."""
     tiles, tmap = {}, {}
-    art = art_classes()
+    ink = art_ink()
     for block in BLOCKS:
-        t, m = tiles_and_map(block, art)
+        t, m = tiles_and_map(block, ink)
         tiles.update(t)
         tmap.update(m)
     return tiles, tmap
