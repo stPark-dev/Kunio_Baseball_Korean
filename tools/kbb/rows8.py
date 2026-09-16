@@ -8,6 +8,9 @@ import struct
 from tools.kbb import table
 
 RECORD_REGIONS = [(0x082E52, 0x0837E0)]   # [n][n words][m][m mark words]...
+# (pointer table, size table, teams): per team two row pointers (marks row, kana row) and one byte count
+# every 4 bytes; the manager names under the team pictures of the inning-change scoreboard.
+PAIR_TABLES = [(0x016713, 0x016947, 13)]
 MARK_TILES = {0x00, 0x02, 0xEB, 0xFB, 0x01, 0x11}
 SITE_RE = re.compile(rb"(?:\xa9(..)\xa2(..)\xa0(..)|\xa2(..)\xa0(..)\xa9(..))\x22\xfd\xf0\x80", re.S)
 
@@ -58,6 +61,13 @@ def extract(rom, banks=(0x10,)):
                 off += 2 + 2 * n
             else:
                 off += 2
+    for ptrs, sizes, teams in PAIR_TABLES:
+        bank = ptrs // 0x8000
+        for t in range(teams):
+            n = struct.unpack_from("<H", rom, sizes + 4 * t)[0] // 2
+            for k in range(2):
+                src = struct.unpack_from("<H", rom, ptrs + 4 * t + 2 * k)[0]
+                add(bank, src, struct.unpack_from("<%dH" % n, rom, bank * 0x8000 + src - 0x8000))
     return rows
 
 

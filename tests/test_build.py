@@ -183,6 +183,20 @@ def test_static8_rows_use_fixed_slots_and_original_tiles():
     assert rom[font.FONT_OFFSET + t * 16:font.FONT_OFFSET + t * 16 + 16] == static8.font8.tile8("투")
 
 
+def test_rows8_extract_pair_tables(monkeypatch):
+    from tools.kbb import rows8
+    rom = bytearray(0x20000)
+    ptrs, sizes = 0x10100, 0x10200
+    struct.pack_into("<HH", rom, ptrs, 0x8300, 0x8310)          # team 0: marks row, kana row
+    struct.pack_into("<H", rom, sizes, 6)                        # 3 cells
+    struct.pack_into("<3H", rom, 0x10300, 0x2000, 0x20EB, 0x2000)
+    struct.pack_into("<3H", rom, 0x10310, 0x2000 | 0x1D, 0x2000 | 0x2D, 0x2000)
+    monkeypatch.setattr(rows8, "PAIR_TABLES", [(ptrs, sizes, 1)])
+    monkeypatch.setattr(rows8, "RECORD_REGIONS", [])
+    rows = rows8.extract(bytes(rom), banks=())
+    assert [(r["id"], r["n"], r["japanese"]) for r in rows] == [("q_028300", 3, "(marks)"), ("q_028310", 3, "あい_")]
+
+
 def test_rows8_table_layout():
     from tools.kbb import encode, rows8
     rows = [{"bank": "10", "addr": "B25A", "n": 3, "korean": "수비"},
