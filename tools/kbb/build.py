@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 
-from tools.kbb import bg2, encode, font8, glyphs, ingame, rows8, script, sprtext, static8, text, titlecard
+from tools.kbb import bg2, encode, font8, glyphs, ingame, lz, rows8, script, sprtext, static8, text, titlecard, titlelogo
 from tools.kbb import labels
 from tools.kbb import labels as L
 
@@ -47,6 +47,10 @@ SHEET2_HOOK_ROM = 0x0092FE                   # $81:92FE, the scene script's cmd 
 MVN_HOOK_ROM = 0x084A94                      # $90:CA94, MVN row copier (X = ROM row, Y = $7F destination)
 MAPLABEL_ROM = 0x1A6000                      # $B4:E000: labels inside compressed tilemaps (offset, word, n, id)
 LABELSITE_ROM = 0x1A6800                     # $B4:E800: (bank, address) -> label id of every translated row
+BLOB_ROM = 0x1A7000                          # $B4:F000: (destination, length, source) of each $7F buffer patch
+LOGO_ROM = 0x1A8000                          # $B5:8000: the Korean title logo tiles and tilemap rows
+LOGO_SHEET = (0x9BB823, 0x9BF21D, 0x4000, 0x2000, 0xE000)   # stream, dictionary, offset, length, $7F address
+LOGO_MAP = (0x939260, 0x93B8AB, 0x01C0, 0x0300, 0x89C0)
 LABELSITE_LIMIT = 0x1800
 CENTRE_PREFIX = "grid_"                      # labels centred in their cells (the team grid)
 GRID_N_SITES = (0x08C215, 0x08C238)          # PEA #4 operands: cells per team-name row in $91:C202
@@ -224,6 +228,30 @@ def widen_grid(rom):
         off = GRID_TABLE + GRID_RECORD * k
         name_x = struct.unpack_from("<H", rom, off)[0]
         struct.pack_into("<H", rom, off + 4, name_x + labels.GRID_CELLS)
+
+
+def title_logo(original, rom):
+    """Put the Korean logo into bank $B5 and describe both patches in the blob table."""
+    tiles, tmap = titlelogo.build()
+    for off, tile in titlelogo.sprite_patches(tiles):
+        rom[off:off + len(tile)] = tile
+    blobs, data = [], bytearray()
+    for (stream, dic, off, length, dest), edit in ((LOGO_SHEET, tiles), (LOGO_MAP, tmap)):
+        orig_buf = lz.decompress(original, lz.snes_to_rom(stream), lz.snes_to_rom(dic))
+        buf = bytearray(orig_buf)[off:off + length]
+        for key, value in edit.items():
+            if isinstance(value, int):
+                struct.pack_into("<H", buf, key - off, value)
+            else:
+                buf[key * 32:key * 32 + 32] = value
+        check = next(i for i in range(0, length - 1, 2) if buf[i] or buf[i + 1])
+        blobs.append(struct.pack("<5H", dest, length, 0x8000 + len(data), check,
+                                 struct.unpack_from("<H", bytes(orig_buf), off + check)[0]))
+        data += buf
+    if LOGO_ROM + len(data) > ROM_SIZE:
+        raise BuildError("title logo does not fit")
+    rom[LOGO_ROM:LOGO_ROM + len(data)] = data
+    return struct.pack("<H", len(blobs)) + b"".join(blobs)
 
 
 def label_sites(rows):
@@ -416,6 +444,8 @@ def build(original, csv_path=None, labels_csv=None, ingame_csv=None, bg2_csv=Non
     rom[RESERVED_ROM:RESERVED_ROM + 64] = reserved_bitmap(original, L.extract(original), label_rows)
     if any(r["id"].startswith(CENTRE_PREFIX) for r in label_rows):
         widen_grid(rom)
+    btab = title_logo(original, rom)
+    rom[BLOB_ROM:BLOB_ROM + len(btab)] = btab
     stab = label_sites(label_rows)
     rom[LABELSITE_ROM:LABELSITE_ROM + len(stab)] = stab
     mtab = maplabel_table(original, label_rows)

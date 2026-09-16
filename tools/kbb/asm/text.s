@@ -113,16 +113,22 @@ Q_STR   = $7E9BF0
 Q_ATTR  = $7E9BF2
 Q_BUF   = $7E9BF4
 Q_CELLS = $7E9BF6
+Q_BANK  = $7E8C34               ; 0 = the row buffer in $7E, 1 = a tilemap buffer in $7F
+T_DST   = $7E8C36               ; destination bank of the MVN copier
 QUEUE_CONT = $80F102            ; after the replaced PHP / PHB / PEA $007E
 ; decompressed-sheet hook ($81:858A): DP $20 = source in bank $7F, $22 = bytes, $18 = VRAM word
 SPRTEXT = $B48000               ; u16 count, entries of (32-byte signature, 32-byte Korean tile)
 SPRBITS = $B4C000               ; 8 KB bitmap of signature first words (quick reject)
 MAPLABELS = $B4E000             ; u16 count, entries (u16 buffer offset, u16 original word, u16 n, u16 label id)
 LABELSITES = $B4E800            ; u16 count, entries (u8 bank, u16 row address, u16 id + $1000 for row 2)
+BLOBS   = $B4F000               ; u16 count, entries (u16 destination in $7F, u16 length,
+                                ; u16 source in $B5, u16 check offset, u16 expected word there)
 T_ADDR  = $7E8C28               ; site_find scratch
 T_BANK  = $7E8C2A
 T_CNT   = $7E8C2C
 T_VAL   = $7E8C2E               ; site_find result (label id + row flag)
+T_LEN   = $7E8C30               ; blob_copy scratch
+T_SRC   = $7E8C32
 MVN_CONT = $90CA98              ; after the replaced PHP / PHB / REP #$30 of the MVN row copier
 S_WORD  = $7E8C26
 S_TILE  = $7E9BF8
@@ -2110,25 +2116,8 @@ kbb_queue:
         jsr site_find
         bcc @rows8
         jmp q_label
-@rows8: lda f:ROWS8
-        sta f:Q_CNT
-        ldx #2
-@scan:  lda f:Q_CNT
-        beq @pass1
-        dec
-        sta f:Q_CNT
-        lda f:ROWS8,x
-        and #$00FF
-        cmp f:Q_DB
-        bne @next
-        lda f:ROWS8+1,x
-        cmp f:Q_X
-        beq @found
-@next:  txa
-        clc
-        adc #5
-        tax
-        bra @scan
+@rows8: jsr rows8_find
+        bcs @found
 @pass1: lda f:Q_X
         tax
         lda f:Q_Y
@@ -2139,9 +2128,7 @@ kbb_queue:
         phb
         pea $007E
         jml QUEUE_CONT
-@found: lda f:ROWS8+3,x
-        sta f:Q_STR
-        pla
+@found: pla
         sta f:Q_A
         phb
         lda f:Q_X
@@ -2170,6 +2157,16 @@ kbb_queue:
         bcc @cells
         lda #32
 @cells: sta f:Q_CELLS
+        lda #0
+        sta f:Q_BANK
+        jsr row8_render
+        jmp q_send
+
+; Draw the translated 8x8 row Q_STR into Q_CELLS cells at Q_BUF, in bank $7E or $7F per
+; Q_BANK, with the original row's attribute bits. Called for VRAM queue rows and for rows
+; the MVN copier ($90:CA94) writes straight into a tilemap buffer.
+row8_render:
+        phb
         pea $B1B1
         plb
         plb
@@ -2211,7 +2208,9 @@ kbb_queue:
         lda f:Q_ATTR
         jsr q_store
         bra @pad
-@done:
+@done:  plb
+        rts
+
 q_send: pea $7E7E
         plb
         plb
@@ -2239,6 +2238,35 @@ q_send: pea $7E7E
         plp
         sec
         rtl
+
+; Q_DB / Q_X = (bank, address) of a row: carry set and Q_STR set when it is a translated
+; 8x8 row of translations/rows8.csv.
+rows8_find:
+        lda f:ROWS8
+        sta f:Q_CNT
+        ldx #2
+@scan:  lda f:Q_CNT
+        bne @go
+        clc
+        rts
+@go:    dec
+        sta f:Q_CNT
+        lda f:ROWS8,x
+        and #$00FF
+        cmp f:Q_DB
+        bne @next
+        lda f:ROWS8+1,x
+        cmp f:Q_X
+        beq @hit
+@next:  txa
+        clc
+        adc #5
+        tax
+        bra @scan
+@hit:   lda f:ROWS8+3,x
+        sta f:Q_STR
+        sec
+        rts
 
 ; Queue source row that starts with a label marker (stack: P, A = byte count; Q_X / Q_Y set,
 ; DB = source bank): render the label into the next row buffer and queue that instead.
@@ -2310,8 +2338,15 @@ q_store:
         adc f:Q_BUF
         tax
         pla
+        pha
+        lda f:Q_BANK
+        bne @w7f
+        pla
         sta f:$7E0000,x
-        txa
+        bra @adv
+@w7f:   pla
+        sta f:$7F0000,x
+@adv:   txa
         sec
         sbc f:Q_BUF
         inc
@@ -2379,6 +2414,7 @@ kbb_sheet2:
         pea $B4B4
         plb
         plb
+        jsr blob_copy
         jsr sheet_scan
         plb
         phd
@@ -2488,21 +2524,58 @@ kbb_mvn:
         phx
         phy
         phb
+        lda 6,s                 ; the copier's A: source bank high, destination bank low
+        and #$00FF
+        sta f:T_DST
+        cmp #$007E
+        bcc @wram               ; we only draw into the WRAM tilemap buffers
+        cmp #$0080
+        bcs @wram
+        lda 6,s
         xba
         and #$00FF
         cmp #$007E
-        beq @pass
+        beq @wram
         cmp #$007F
-        beq @pass
-        tay                     ; Y = source bank
+        bne @rom
+@wram:  jmp @pass
+@rom:   tay                     ; Y = source bank
         sep #$20
         pha
         plb                     ; DB = source bank
         rep #$20
         txa
         jsr site_find
-        bcc @pass
-        lda f:T_VAL
+        bcs @label
+        lda f:T_BANK            ; not a 16x16 label: an 8x8 row drawn straight into the buffer?
+        sta f:Q_DB
+        txa
+        sta f:Q_X
+        jsr rows8_find
+        bcs @row8ok
+        jmp @pass
+@row8ok:
+        ; stack from S+1: B(1) Y(2) X(2) A(2) P(1) return(3) count(2)
+        lda 12,s
+        inc
+        lsr
+        sta f:Q_CELLS
+        lda 2,s
+        sta f:Q_BUF             ; destination address in bank $7F
+        lda a:$0000,x
+        and #$FC00
+        sta f:Q_ATTR
+        lda f:T_DST
+        and #$0001
+        sta f:Q_BANK
+        jsr row8_render
+        plb
+        ply
+        plx
+        pla
+        plp
+        rtl
+@label: lda f:T_VAL
         ora #$C000
         pha                     ; label id + row flag
         lda a:$0002,x
@@ -2524,7 +2597,7 @@ kbb_mvn:
         sta z_n
         lda 8,s
         sta z_buf
-        lda #$007F
+        lda f:T_DST
         sta z_buf+2
         lda 8,s
         and #$003F
@@ -2558,6 +2631,56 @@ kbb_mvn:
         phb
         rep #$30
         jml MVN_CONT
+
+; Replace whole runs of a decompressed $7F buffer with data from bank $B5 (the Korean title
+; logo: its tiles and the tilemap rows that place them). Independent of DB and DP.
+blob_copy:
+        lda f:BLOBS
+        bne @start
+        rts
+@start: sta f:T_CNT
+        ldx #2
+@ent:   lda f:T_CNT
+        bne @go
+        rts
+@go:    dec
+        sta f:T_CNT
+        lda f:BLOBS,x
+        sta f:T_ADDR
+        cmp f:S_TILE
+        bcc @next
+        cmp f:S_END
+        beq @hit
+        bcs @next
+@hit:   lda f:BLOBS+6,x         ; only patch the sheet this blob was made for
+        clc
+        adc f:T_ADDR
+        phx
+        tax
+        lda f:$7F0000,x
+        plx
+        cmp f:BLOBS+8,x
+        bne @next
+        lda f:BLOBS+2,x
+        sta f:T_LEN
+        lda f:BLOBS+4,x
+        sta f:T_SRC
+        phx
+        phb
+        lda f:T_SRC
+        tax
+        lda f:T_ADDR
+        tay
+        lda f:T_LEN
+        dec
+        .byte $54, $7F, $B5     ; MVN bank $B5 -> bank $7F
+        plb
+        plx
+@next:  txa
+        clc
+        adc #10
+        tax
+        jmp @ent
 
 ; DB = $B4. Replace every tile in [S_TILE, S_END) of bank $7F that matches a signature.
 sheet_scan:
