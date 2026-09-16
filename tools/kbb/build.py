@@ -40,6 +40,7 @@ ROWS8_ROM = CODE_ROM + 0x2000                # $B1:A000: queue-hook row table + 
 ROWS8_LIMIT = 0x1D00
 QUEUE_ROM = 0x0070FD                         # $80:F0FD, the VRAM queue routine
 SPRTEXT_ROM = 0x1A0000                       # $B4:8000: location-title tile signatures and Korean tiles
+SPRTEXT_BITMAP_ROM = 0x1A4000                # $B4:C000: 8 KB first-word bitmap for the scan
 SHEET_HOOK_ROM = 0x00858A                    # $81:858A, LDA $22 / BEQ before the $7F-sheet DMA
 SHEET2_HOOK_ROM = 0x0092FE                   # $81:92FE, the scene script's cmd 1C VRAM upload
 TABLE_LIST = ("surname", "name_extra1", "name_extra2", "name_set3", "name_set4", "name_set5", "item")
@@ -368,7 +369,10 @@ def build(original, csv_path=None, labels_csv=None, ingame_csv=None, teams_csv=N
     mark_labels(rom, label_rows)
     korean_kanji16(rom)
     spr = sprtext.build_table(load_ingame(sprtext_csv))
+    if len(spr) > SPRTEXT_BITMAP_ROM - SPRTEXT_ROM:
+        raise BuildError("sprite-text table too large")
     rom[SPRTEXT_ROM:SPRTEXT_ROM + len(spr)] = spr
+    rom[SPRTEXT_BITMAP_ROM:SPRTEXT_BITMAP_ROM + 0x2000] = sprtext.first_word_bitmap(spr)
     titlecard.apply(rom, load_ingame(titles_csv))
     slots = static8.apply(rom, load_ingame(static8_csv))
     if slots:

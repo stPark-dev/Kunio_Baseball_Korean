@@ -115,6 +115,8 @@ Q_CELLS = $7E9BF6
 QUEUE_CONT = $80F102            ; after the replaced PHP / PHB / PEA $007E
 ; decompressed-sheet hook ($81:858A): DP $20 = source in bank $7F, $22 = bytes, $18 = VRAM word
 SPRTEXT = $B48000               ; u16 count, entries of (32-byte signature, 32-byte Korean tile)
+SPRBITS = $B4C000               ; 8 KB bitmap of signature first words (quick reject)
+S_WORD  = $7E8C26
 S_TILE  = $7E9BF8
 S_ENT   = $7E9BFA
 S_CNT   = $7E9BFC
@@ -2200,9 +2202,26 @@ sheet_scan:
 @tile:  lda f:S_TILE
         cmp f:S_END
         beq @go
-        bcs @done
-@go:
-        lda f:SPRTEXT
+        bcc @go
+        jmp @done
+@go:    tax                     ; quick reject: is this tile's first word the start of any signature?
+        lda f:$7F0000,x
+        sta f:S_WORD
+        lsr
+        lsr
+        lsr
+        tax
+        lda f:SPRBITS,x
+        sta f:S_CNT
+        lda f:S_WORD
+        and #7
+        asl
+        tax
+        lda f:bit_mask,x
+        and f:S_CNT
+        bne @scan
+        jmp @next_tile
+@scan:  lda f:SPRTEXT
         sta f:S_CNT
         ldy #2
 @ent:   lda f:S_CNT
@@ -2263,3 +2282,5 @@ sheet_scan:
         sta f:S_TILE
         jmp @tile
 @done:  rts
+bit_mask:
+        .word 1, 2, 4, 8, 16, 32, 64, 128

@@ -215,6 +215,11 @@ def test_sprtext_table_and_codec():
     row = {"korean": "열", "tl": sig.hex(), "tr": "00" * 32, "bl": sig.hex(), "br": (b"\x01" * 32).hex()}
     tab = sprtext.build_table([row])
     assert struct.unpack_from("<H", tab, 0)[0] == 3                # the all-zero quadrant is skipped
+    bits = sprtext.first_word_bitmap(tab)
+    assert len(bits) == 0x2000
+    words = {struct.unpack_from("<H", tab, 2 + 64 * i)[0] for i in range(3)}
+    assert all(bits[w >> 3] & (1 << (w & 7)) for w in words)
+    assert not any(bits[w >> 3] & (1 << (w & 7)) for w in range(0x10000) if w not in words)
     assert tab[2:34] == sig
     rep = sprtext.decode4(tab[34:66])
     assert {v for r in rep for v in r} <= {sprtext.BG, sprtext.INK} and any(sprtext.INK in r for r in rep)

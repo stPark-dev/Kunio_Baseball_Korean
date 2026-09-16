@@ -60,6 +60,17 @@ def quadrants(px, bg=BG):
     return out
 
 
+def first_word_bitmap(table):
+    """8 KB bitmap indexed by a tile's first word: set when some signature starts with that word.
+    The asm scan skips every tile whose bit is clear, so only real candidates are compared."""
+    count = struct.unpack_from("<H", table, 0)[0]
+    bits = bytearray(0x2000)
+    for i in range(count):
+        w = struct.unpack_from("<H", table, 2 + 64 * i)[0]
+        bits[w >> 3] |= 1 << (w & 7)
+    return bytes(bits)
+
+
 def build_table(rows):
     """[u16 count][entries: 32-byte signature, 32-byte replacement]; blank quadrants are skipped."""
     entries = []
