@@ -101,7 +101,8 @@ M_CELLS = $7E9BE2
 SHIFT_TABLE = $B1BD00           ; 4-byte entries: low word = string address in bank $B1
 ; VRAM queue hook: rows queued straight from ROM (player-info labels and values)
 ROWS8   = $B1A000               ; u16 count, entries (u8 bank, u16 addr, u16 string), strings
-ROWBUF  = $7E8C40               ; 8 rotating 64-byte row buffers ($8C40-$8E3F)
+ROWBUF  = $7E8C40               ; 15 rotating 64-byte row buffers ($8C40-$8FFF): a menu queues up to
+ROWBUFS = 15                    ; 14 rows before the NMI drains them
 M_ROW   = $7E9BE4
 Q_A     = $7E9BE6
 Q_X     = $7E9BE8
@@ -116,6 +117,8 @@ QUEUE_CONT = $80F102            ; after the replaced PHP / PHB / PEA $007E
 ; decompressed-sheet hook ($81:858A): DP $20 = source in bank $7F, $22 = bytes, $18 = VRAM word
 SPRTEXT = $B48000               ; u16 count, entries of (32-byte signature, 32-byte Korean tile)
 SPRBITS = $B4C000               ; 8 KB bitmap of signature first words (quick reject)
+MAPLABELS = $B4E000             ; u16 count, entries (u16 buffer offset, u16 original word, u16 n, u16 label id)
+MVN_CONT = $90CA98              ; after the replaced PHP / PHB / REP #$30 of the MVN row copier
 S_WORD  = $7E8C26
 S_TILE  = $7E9BF8
 S_ENT   = $7E9BFA
@@ -192,6 +195,8 @@ z_x     = $2C
 z_y     = $2E
 z_ent   = $30                   ; byte offset of the cache entry's tile list
 z_i     = $32
+z_mode  = $34                   ; 1 = 8px-font label (string starts with $01)
+z_buf   = $36                   ; 24-bit destination pointer of label_write_buf ($36-$38)
 
 .segment "CODE"
 
@@ -214,6 +219,7 @@ z_i     = $32
         jml kbb_queue           ; $B1803C
         jml kbb_sheet           ; $B18040
         jml kbb_sheet2          ; $B18044
+        jml kbb_mvn             ; $B18048
 
 bit_table:
         .word $0001, $0002, $0004, $0008, $0010, $0020, $0040, $0080
@@ -421,11 +427,18 @@ label_width:
         plb
         lda #0
         sta z_pen
+        sta z_mode
         lda z_id
         asl
         tax
         lda f:LABEL_TABLE,x
         tay
+        lda $0000,y
+        and #$00FF
+        cmp #$0001
+        bne @ch
+        iny
+        inc z_mode
 @ch:    lda $0000,y
         and #$00FF
         beq @end
@@ -436,10 +449,14 @@ label_width:
         cmp #$00F0
         beq @skip2
         jsr get_index
+        ldx z_mode
+        bne @w8
         tax
         lda f:WIDTHS,x
         and #$00FF
-        clc
+        bra @add
+@w8:    lda #8
+@add:   clc
         adc z_pen
         sta z_pen
         bra @ch
@@ -657,6 +674,85 @@ blit_glyph:
         asl
         tay
         lda [z_ptr],y
+        jsr plot_row
+        inc z_row
+        lda z_row
+        cmp #16
+        bne @row
+        lda z_pen
+        clc
+        adc z_w
+        sta z_pen
+        sec
+        rts
+
+; 8px-font glyph A at z_pen: the 8x8 tile's plane 0 (GLYPH8) is drawn on rows 4..11 of the cell.
+blit8:
+        sta z_idx
+        lda z_pen
+        clc
+        adc #8
+        cmp z_maxpx
+        bcc @fits
+        beq @fits
+        clc
+        rts
+@fits:  lda z_idx
+        asl
+        asl
+        asl
+        asl
+        clc
+        adc #.loword(GLYPH8)
+        sta z_ptr
+        sep #$20
+        lda #^GLYPH8
+        sta z_ptr+2
+        rep #$20
+        lda z_pen
+        and #$0007
+        sta z_shift
+        lda z_pen
+        lsr
+        lsr
+        lsr
+        sta z_col
+        lda #0
+        ldx z_col
+        beq @mul_done
+        clc
+@mul:   adc z_stride
+        dex
+        bne @mul
+@mul_done:
+        clc
+        adc z_base
+        sta z_dst
+        lda #4
+        sta z_row
+@row:   lda z_row
+        sec
+        sbc #4
+        asl
+        tay
+        lda [z_ptr],y
+        and #$00FF
+        xba                     ; row bits in the high byte, like a 16px glyph row
+        jsr plot_row
+        inc z_row
+        lda z_row
+        cmp #12
+        bne @row
+        lda z_pen
+        clc
+        adc #8
+        sta z_pen
+        sec
+        rts
+
+; OR one glyph row (A = 16 bits, leftmost pixel in bit 15) shifted right by z_shift into
+; both planes of the tile column at z_dst, row z_row (0..15).
+plot_row:
         ldx #0
         stx z_spill
         ldx z_shift
@@ -712,17 +808,6 @@ blit_glyph:
         ora f:$7E0001,x
         sta f:$7E0001,x
         rep #$20
-        inc z_row
-        lda z_row
-        cmp #16
-        beq @rows_done
-        jmp @row
-@rows_done:
-        lda z_pen
-        clc
-        adc z_w
-        sta z_pen
-        sec
         rts
 
 ; ---- label hook: replaces PHP PHB PHD REP #$30 at $91B390 -------------------
@@ -778,6 +863,11 @@ kbb_label_row:
 
 ; DP = Z. Draws label z_id (top or bottom row per z_tpl bit 12) at z_x/z_y, z_n cells.
 label_body:
+        jsr label_prepare
+        jmp label_write_win
+
+; DP = Z. Finds label z_id in the pool cache (or allocates and paints it); z_cols/z_ent set.
+label_prepare:
         jsr pool_setup
         lda f:L_MAPN
         sta z_tmp
@@ -796,10 +886,11 @@ label_body:
         sta z_cols
         txa
         jsr entry_offset
-        jsr label_paint         ; the scene may have reloaded the font block: send again
-        bra @write
-@miss:  jsr label_render
-@write:
+        jmp label_paint         ; the scene may have reloaded the font block: send again
+@miss:  jmp label_render
+
+; Write the prepared label's cells through the game's window buffer at z_x/z_y.
+label_write_win:
         ldx z_x
         ldy z_y
         jsl ROW_OFFSET
@@ -839,6 +930,43 @@ label_body:
         ldy z_y
         jsl ROW_DIRTY_MASK
         jsl ROW_DIRTY_SET
+        rts
+
+; Write the prepared label's cells straight to memory at [z_buf] (tilemap buffers, the MVN
+; copier's destination, the queue row buffer); max(z_cols, z_n) words, the extra ones blank.
+label_write_buf:
+        lda #0
+        sta z_i
+@cell:  lda z_i
+        cmp z_cols
+        bcs @blank
+        lda z_tpl
+        and #$1000
+        beq @top
+        lda z_i
+        clc
+        adc z_cols
+        bra @idx
+@top:   lda z_i
+@idx:   asl
+        clc
+        adc z_ent
+        tax
+        lda f:LTILES,x
+        clc
+        adc f:L_POOL0
+        bra @put
+@blank: lda #0
+@put:   ora z_attr
+        sta [z_buf]
+        inc z_buf
+        inc z_buf
+        inc z_i
+        lda z_i
+        cmp z_cols
+        bcc @cell
+        cmp z_n
+        bcc @cell
         rts
 
 ; A = byte offset of a map entry (k*6) -> z_ent = k * LTILES_STRIDE
@@ -1044,9 +1172,20 @@ label_paint:
         asl
         asl
         sta z_maxpx
-        lda #0
+        jsr label_width         ; also sets z_mode from the string's prefix
+        ldx z_mode
+        beq @left
+        sta z_tmp               ; 8px labels are centred in their cells
+        lda z_maxpx
+        sec
+        sbc z_tmp
+        bcc @left
+        lsr
         sta z_pen
-        phb
+        bra @go
+@left:  lda #0
+        sta z_pen
+@go:    phb
         pea $B1B1
         plb
         plb
@@ -1055,6 +1194,11 @@ label_paint:
         tax
         lda f:LABEL_TABLE,x
         tay
+        lda $0000,y
+        and #$00FF
+        cmp #$0001
+        bne @ch
+        iny
 @ch:    lda $0000,y
         and #$00FF
         beq @end
@@ -1066,8 +1210,12 @@ label_paint:
         beq @skip2
         jsr get_index
         phy
+        ldx z_mode
+        bne @g8
         jsr blit_glyph
-        ply
+        bra @gd
+@g8:    jsr blit8
+@gd:    ply
         bra @ch
 @sp:    lda z_pen
         clc
@@ -1981,7 +2129,12 @@ kbb_queue:
         sta f:Q_X
         tya
         sta f:Q_Y
-        lda f:ROWS8
+        lda a:$0000,x           ; a label marker: draw from the pool (16x16 menu rows)
+        and #$E000
+        cmp #$C000
+        bne @rows8
+        jmp q_label
+@rows8: lda f:ROWS8
         sta f:Q_CNT
         ldx #2
 @scan:  lda f:Q_CNT
@@ -2022,7 +2175,9 @@ kbb_queue:
         sta f:Q_ATTR
         lda f:M_ROW
         inc
-        and #7
+        cmp #ROWBUFS
+        bcc *+5
+        lda #0
         sta f:M_ROW
         asl
         asl
@@ -2080,7 +2235,8 @@ kbb_queue:
         lda f:Q_ATTR
         jsr q_store
         bra @pad
-@done:  pea $7E7E
+@done:
+q_send: pea $7E7E
         plb
         plb
         lda f:Q_BUF
@@ -2107,6 +2263,67 @@ kbb_queue:
         plp
         sec
         rtl
+
+; Queue source row that starts with a label marker (stack: P, A = byte count; Q_X / Q_Y set,
+; DB = source bank): render the label into the next row buffer and queue that instead.
+q_label:
+        pla
+        sta f:Q_A
+        phb
+        phd
+        pea Z
+        pld
+        lda f:Q_X
+        tax
+        lda a:$0000,x
+        sta z_tpl
+        and #$0FFF
+        sta z_id
+        lda a:$0002,x
+        and #$FC00
+        sta z_attr
+        lda f:Q_A
+        lsr
+        sta z_n
+        lda f:Q_Y
+        and #$001F
+        sta z_x
+        lda f:Q_Y
+        lsr
+        lsr
+        lsr
+        lsr
+        lsr
+        and #$001F
+        sta z_y
+        lda f:M_ROW
+        inc
+        cmp #ROWBUFS
+        bcc *+5
+        lda #0
+        sta f:M_ROW
+        asl
+        asl
+        asl
+        asl
+        asl
+        asl
+        clc
+        adc #.loword(ROWBUF)
+        sta f:Q_BUF
+        sta z_buf
+        lda #$007E
+        sta z_buf+2
+        jsr label_prepare
+        jsr label_write_buf
+        lda z_cols
+        cmp z_n
+        bcs @wide
+        lda z_n
+@wide:  asl
+        sta f:Q_A               ; bytes actually written
+        pld
+        jmp q_send
 
 ; A = cell word, X = byte offset in the row buffer -> stored; X += 2
 q_store:
@@ -2187,6 +2404,11 @@ kbb_sheet2:
         plb
         jsr sheet_scan
         plb
+        phd
+        pea Z
+        pld
+        jsr map_labels
+        pld
 @pass:  ply
         plx
         plp
@@ -2196,6 +2418,168 @@ kbb_sheet2:
         plb
         plb
         jml SHEET2_CONT
+
+; DP = Z. Rows of the decompressed tilemap at S_LASTSRC (bank $7F) that still hold the
+; original first word of a MAPLABELS entry are redrawn from the label pool (top row at the
+; entry's offset, bottom row 64 bytes below).
+map_labels:
+        lda f:MAPLABELS
+        sta z_tmp
+        lda #0
+        sta z_row               ; pool reset done for this map
+        ldx #0
+@ent:   lda z_tmp
+        bne @go
+        rts
+@go:    dec
+        sta z_tmp
+        lda f:MAPLABELS+2,x
+        clc
+        adc f:S_LASTSRC
+        sta z_buf
+        lda #$007F
+        sta z_buf+2
+        phx
+        tax
+        lda f:$7F0000,x
+        plx
+        cmp f:MAPLABELS+4,x
+        bne @next
+        pha
+        lda z_row
+        bne @reset_done
+        inc z_row               ; a labelled screen is being loaded: whatever the pool held is gone
+        lda #0
+        sta f:L_NEXT
+        sta f:L_MAPN
+@reset_done:
+        pla
+        and #$FC00
+        sta z_attr
+        lda f:MAPLABELS+6,x
+        sta z_n
+        lda f:MAPLABELS+8,x
+        ora #$C000
+        sta z_tpl
+        and #$0FFF
+        sta z_id
+        lda f:MAPLABELS+2,x
+        and #$003F
+        lsr
+        sta z_x
+        lda f:MAPLABELS+2,x
+        lsr
+        lsr
+        lsr
+        lsr
+        lsr
+        lsr
+        sta z_y
+        phx
+        jsr label_prepare
+        jsr label_write_buf
+        plx
+        lda f:MAPLABELS+2,x
+        clc
+        adc f:S_LASTSRC
+        clc
+        adc #64
+        sta z_buf
+        lda #$007F
+        sta z_buf+2
+        lda z_tpl
+        ora #$1000
+        sta z_tpl
+        phx
+        jsr label_prepare
+        jsr label_write_buf
+        plx
+@next:  txa
+        clc
+        adc #8
+        tax
+        jmp @ent
+
+; ---- MVN row copier hook: replaces PHP PHB REP #$30 at $90:CA94 ------------------------
+; Entry: A = (source bank << 8) | destination bank, X = source address, Y = destination
+; address in bank $7F, stack: [return 3][byte count - 1 (2)]. A ROM row that starts with a
+; label marker is drawn from the pool into the destination instead of being copied.
+kbb_mvn:
+        php
+        rep #$30
+        pha
+        phx
+        phy
+        phb
+        xba
+        and #$00FF
+        cmp #$007E
+        beq @pass
+        cmp #$007F
+        beq @pass
+        sep #$20
+        pha
+        plb                     ; DB = source bank
+        rep #$20
+        lda a:$0000,x
+        and #$E000
+        cmp #$C000
+        bne @pass
+        lda a:$0000,x
+        pha                     ; marker
+        lda a:$0002,x
+        and #$FC00
+        pha                     ; attribute bits of the row
+        phd
+        pea Z
+        pld
+        ; stack: D(2) attr(2) marker(2) B(1) Y(2) X(2) A(2) P(1) return(3) count(2)
+        lda 5,s
+        sta z_tpl
+        and #$0FFF
+        sta z_id
+        lda 3,s
+        sta z_attr
+        lda 18,s
+        inc
+        lsr
+        sta z_n
+        lda 8,s
+        sta z_buf
+        lda #$007F
+        sta z_buf+2
+        lda 8,s
+        and #$003F
+        lsr
+        sta z_x
+        lda 8,s
+        lsr
+        lsr
+        lsr
+        lsr
+        lsr
+        lsr
+        sta z_y
+        jsr label_prepare
+        jsr label_write_buf
+        pld
+        pla
+        pla
+        plb
+        ply
+        plx
+        pla
+        plp
+        rtl
+@pass:  plb
+        ply
+        plx
+        pla
+        plp
+        php                     ; the replaced PHP / PHB / REP #$30
+        phb
+        rep #$30
+        jml MVN_CONT
 
 ; DB = $B4. Replace every tile in [S_TILE, S_END) of bank $7F that matches a signature.
 sheet_scan:

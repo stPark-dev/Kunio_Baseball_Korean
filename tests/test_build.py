@@ -83,22 +83,63 @@ def test_kanji16_glyphs_are_replaced_with_centered_hangul():
     assert font.glyph16(rom, untouched) == [[0] * 16] * 16
 
 
-def test_grid_records_and_encode():
-    from tools.kbb import font, grid
-    rom = bytearray(font.FONT_OFFSET + font.FONT_SIZE)
-    a, b = grid.glyph_tiles("花"), grid.glyph_tiles("園")
-    struct.pack_into("<12H", rom, grid.TABLE, 14, 8, 18, 9, a[0], a[1], b[0], b[1], a[2], a[3], b[2], b[3])
-    recs = grid.records(rom)
-    assert len(recs) == 1 and recs[0]["japanese"] == "花園" and recs[0]["name_x"] == 14
-    used = grid.encode(rom, [{"offset": "%06X" % grid.TABLE, "korean": "하나조노"}])
-    s0, s1 = grid.glyph_tiles(grid.SLOT_GLYPHS[0]), grid.glyph_tiles(grid.SLOT_GLYPHS[1])
-    words = struct.unpack_from("<8H", rom, grid.TABLE + 8)
-    assert words == (s0[0], s0[1], s1[0], s1[1], s0[2], s0[3], s1[2], s1[3])
-    assert used == set(words) and used <= grid.slot_tiles()
-    top = font.tile(rom, s0[0])
-    assert top[:4] == [[0] * 8] * 4 and any(3 in r for r in top[4:])   # text sits in the middle rows
-    assert any(3 in r for r in font.tile(rom, s0[2])[:4])
+def test_label_kinds_grid_mvn_map(monkeypatch):
+    from tools.kbb import labels, lz
+    rom = bytearray(0x100000)
+    table, _ = labels.GRID_RECORDS
+    a, b = labels.glyph_tiles("花"), labels.glyph_tiles("園")
+    struct.pack_into("<12H", rom, table, 14, 8, 18, 9, a[0], a[1], b[0], b[1], a[2], a[3], b[2], b[3])
+    monkeypatch.setattr(labels, "GRID_RECORDS", (table, 1))
+    monkeypatch.setattr(labels, "MVN_TABLES", [(0x0820D0, 1, 3)])
+    struct.pack_into("<H", rom, 0x0820D0, 0xA105)
+    k = labels.glyph_tiles("打")
+    struct.pack_into("<3H", rom, 0x82105, 0x2000 | k[0], 0x2000 | k[1], 0x2002)
+    struct.pack_into("<3H", rom, 0x8210B, 0x2000 | k[2], 0x2000 | k[3], 0x2002)
+    buf = bytearray(2048)
+    n = labels.glyph_tiles("次")
+    struct.pack_into("<2H", buf, 0x1C8, 0x2C00 | n[0], 0x2C00 | n[1])
+    struct.pack_into("<2H", buf, 0x1C8 + 64, 0x2C00 | n[2], 0x2C00 | n[3])
+    monkeypatch.setattr(labels, "MAP_ROWS", [(0x93B7BC, 0x93B8AB, 0x01C8, 2)])
+    monkeypatch.setattr(lz, "decompress", lambda *a, **k: bytes(buf))
+    for name in ("RECORD_LISTS", "ROW_TABLES", "COUNTED_LISTS", "EXTRA_ROWS"):
+        monkeypatch.setattr(labels, name, [])
+    rows = {r["id"]: r for r in labels.extract(bytes(rom))}
+    g = rows["grid_00"]
+    assert (g["bank"], g["top"], g["bottom"], g["n"], g["x"], g["y"], g["japanese"]) == \
+        ("11", "%04X" % (0x8000 + table % 0x8000 + 8), "%04X" % (0x8000 + table % 0x8000 + 16), 4, 14, 8, "花園")
+    m = rows["mvn_0820D0_00"]
+    assert (m["bank"], m["top"], m["bottom"], m["n"], m["japanese"]) == ("10", "A105", "A10B", 3, "打")
+    t = rows["map_93B7BC_01C8"]
+    assert (t["bank"], t["top"], t["bottom"], t["n"], t["x"], t["y"], t["japanese"]) == ("7F", "01C8", "0208", 2, 4, 7, "次")
+    assert labels.row_words(bytes(rom), t, "bottom")[0] == 0x2C00 | n[2]
 
+
+def test_label_table_narrow_flag_and_markers():
+    from tools.kbb import build, encode
+    rows = [{"id": "site_1", "bank": "10", "top": "A000", "bottom": "A010", "n": 2, "korean": "가"},
+            {"id": "grid_00", "bank": "11", "top": "C493", "bottom": "C49B", "n": 4, "korean": "나다"},
+            {"id": "map_93B7BC_01C8", "bank": "7F", "top": "01C8", "bottom": "0208", "n": 2, "korean": "라"}]
+    gs = encode.GlyphSet([r["korean"] for r in rows])
+    tab = build.label_table(rows, gs)
+    p0, p1, p2 = struct.unpack_from("<3H", tab, 0)
+    assert tab[p0 - 0xC000] != 1 and tab[p1 - 0xC000] == 1 and tab[p2 - 0xC000] != 1
+    rom = bytearray(0x100000)
+    struct.pack_into("<2H", rom, 0x82000, 0x2D86, 0x2D87)
+    struct.pack_into("<4H", rom, 0x8C493, 1, 2, 3, 4)
+    build.mark_labels(rom, rows)
+    assert struct.unpack_from("<2H", rom, 0x82000) == (0xC000, 0x2D87)      # marker, attribute word kept
+    assert struct.unpack_from("<2H", rom, 0x82010) == (0xD000, 0)
+    assert struct.unpack_from("<4H", rom, 0x8C493) == (0xC001, 2, 3, 4)
+    assert not any(rom[0x1C8:0x1CA])                                        # bank-7F rows are not marked
+
+
+def test_maplabel_table(monkeypatch):
+    from tools.kbb import build, labels
+    rows = [{"id": "x", "bank": "10", "top": "A000", "bottom": "A010", "n": 2, "korean": "가"},
+            {"id": "map_93B7BC_01C8", "bank": "7F", "top": "01C8", "bottom": "0208", "n": 12, "korean": "다음"}]
+    monkeypatch.setattr(labels, "row_words", lambda rom, r, key: (0x2E80, 0x2E81))
+    tab = build.maplabel_table(b"", rows)
+    assert struct.unpack("<5H", tab) == (1, 0x01C8, 0x2E80, 12, 1)
 
 def test_bg2_tile_codec_and_styles():
     from tools.kbb import bg2

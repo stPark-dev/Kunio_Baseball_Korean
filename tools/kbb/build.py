@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 
-from tools.kbb import bg2, encode, font8, glyphs, grid, ingame, rows8, script, sprtext, static8, text, titlecard
+from tools.kbb import bg2, encode, font8, glyphs, ingame, rows8, script, sprtext, static8, text, titlecard
 from tools.kbb import labels as L
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -43,6 +43,9 @@ SPRTEXT_ROM = 0x1A0000                       # $B4:8000: location-title tile sig
 SPRTEXT_BITMAP_ROM = 0x1A4000                # $B4:C000: 8 KB first-word bitmap for the scan
 SHEET_HOOK_ROM = 0x00858A                    # $81:858A, LDA $22 / BEQ before the $7F-sheet DMA
 SHEET2_HOOK_ROM = 0x0092FE                   # $81:92FE, the scene script's cmd 1C VRAM upload
+MVN_HOOK_ROM = 0x084A94                      # $90:CA94, MVN row copier (X = ROM row, Y = $7F destination)
+MAPLABEL_ROM = 0x1A6000                      # $B4:E000: labels inside compressed tilemaps (offset, word, n, id)
+NARROW_PREFIX = "grid_"                      # labels drawn with the 8px font (team grid cells are 32px wide)
 TABLE_LIST = ("surname", "name_extra1", "name_extra2", "name_set3", "name_set4", "name_set5", "item")
 MENU_POOL = [t for t in range(256) if t & 0xF in (0x9, 0xA, 0xB, 0xD, 0xE, 0xF) and t != 0x0D]
 ASM_SOURCE = os.path.join(ROOT, "tools", "kbb", "asm", "text.s")
@@ -53,7 +56,8 @@ CODE_ENTRY = 0xB18000
 (ENTRY_START, ENTRY_MAIN, ENTRY_NESTED, ENTRY_NMI, ENTRY_LABEL,
  ENTRY_GAME_START, ENTRY_GAME_MAIN, ENTRY_GAME_NESTED, ENTRY_HUD_NAME,
  ENTRY_ROSTER_NAME, ENTRY_ROSTER_SHIFT, ENTRY_ROSTER_ITEM, ENTRY_ROSTER_W4,
- ENTRY_ROSTER_FULL, ENTRY_ROSTER_FULL7F, ENTRY_QUEUE, ENTRY_SHEET, ENTRY_SHEET2) = (CODE_ENTRY + 4 * k for k in range(18))
+ ENTRY_ROSTER_FULL, ENTRY_ROSTER_FULL7F, ENTRY_QUEUE, ENTRY_SHEET, ENTRY_SHEET2,
+ ENTRY_MVN) = (CODE_ENTRY + 4 * k for k in range(19))
 GAME_PX = 176          # in-game commentary window: 22 columns
 # The in-game hooks work in isolation but every byte of VRAM is in use during a match
 # (BG1 has a 64x64 tilemap at $E000-$FFFF), so there is no room for the glyph cache yet.
@@ -62,7 +66,10 @@ GAME_TEXT = True
 LABEL_TABLE_ROM = CODE_ROM + 0x4000          # $B1:C000, u16 string offsets then strings
 RESERVED_ROM = CODE_ROM + 0x3F00             # $B1:BF00, 64-byte bitmap of kanji tiles to keep
 # 16x16 glyphs drawn by screens whose data is not located yet (versus title, pre-game menu)
-RESERVED_GLYPHS = "熱血野球大会対先発火小変更打順守備選手デタ自敵チム"
+RESERVED_GLYPHS = "熱血野球大会対先発火小変更打順守備選手デタ自敵チム第回戦交代使用"
+# glyph indices the reading table cannot name: 8x16 digit pairs 01..89, ［ ］ !, ・ (the "." of .225),
+# 野次気合 / アイテム of the time-out menu (see kanji16.KOREAN16_IDX)
+RESERVED_INDICES = (0x57, 0x5F, 0x67, 0x6F, 0x77, 0x7B, 0x49, 0x41, 0x42, 0x43, 0x44, 0x07, 0x47, 0x4F)
 LABEL_TABLE_LIMIT = 0x4000
 LABEL_MARK_TOP, LABEL_MARK_BOTTOM = 0xC000, 0xD000
 ROW_WRITER_ROM = 0x08B390
@@ -128,6 +135,7 @@ def patches(table_addr, game_text=GAME_TEXT):
         (QUEUE_ROM, b"\x08\x8B\xF4\x7E\x00", jml(ENTRY_QUEUE) + b"\xEA"),   # VRAM queue: translated ROM rows
         (SHEET_HOOK_ROM, b"\xA5\x22\xF0\x27", jml(ENTRY_SHEET)),           # decompressed sheet -> Korean titles
         (SHEET2_HOOK_ROM, b"\x08\x8B\x4B\xAB", jml(ENTRY_SHEET2)),         # cmd 1C uploads from $7F buffers
+        (MVN_HOOK_ROM, b"\x08\x8B\xC2\x30", jml(ENTRY_MVN)),               # MVN-copied rows with a marker
     ]
     return base + (game if game_text else [])
 
@@ -189,6 +197,8 @@ def label_table(rows, gs):
     base = 0xC000 + 2 * len(rows)
     for r in rows:
         ptrs += struct.pack("<H", base + len(strings))
+        if r["id"].startswith(NARROW_PREFIX):
+            strings += b"\x01"                      # 8px-font label (asm: label_width / label_paint)
         strings += gs.encode(r["korean"].replace("\n", " "))
     data = bytes(ptrs + strings)
     if len(data) > LABEL_TABLE_LIMIT:
@@ -197,12 +207,27 @@ def label_table(rows, gs):
 
 
 def mark_labels(rom, rows):
-    """Overwrite each translated row pair with marker words (see asm/text.s)."""
+    """Put a marker word in front of each translated ROM row pair (see asm/text.s); the rest of
+    the row stays (the MVN hook takes the attribute bits from the second word)."""
     for lid, r in enumerate(rows):
-        bank, n = int(r["bank"], 16), int(r["n"])
+        if r["bank"] == "7F":
+            continue
+        bank = int(r["bank"], 16)
         for key, mark in (("top", LABEL_MARK_TOP), ("bottom", LABEL_MARK_BOTTOM)):
             off = bank * 0x8000 + int(r[key], 16) - 0x8000
-            rom[off:off + 2 * n] = struct.pack("<H", mark | lid) + b"\x00\x00" * (n - 1)
+            struct.pack_into("<H", rom, off, mark | lid)
+
+
+def maplabel_table(original, rows):
+    """[u16 count][entries: u16 buffer offset, u16 original first word, u16 n, u16 label id] for the
+    translated rows that live inside compressed tilemaps (bank "7F")."""
+    entries = []
+    for lid, r in enumerate(rows):
+        if r["bank"] != "7F":
+            continue
+        word = L.row_words(original, r, "top")[0]
+        entries.append(struct.pack("<4H", int(r["top"], 16), word, int(r["n"]), lid))
+    return struct.pack("<H", len(entries)) + b"".join(entries)
 
 
 def reserved_bitmap(rom, all_rows, translated, extra=()):
@@ -213,13 +238,10 @@ def reserved_bitmap(rom, all_rows, translated, extra=()):
     for r in all_rows:
         if r["id"] in done:
             continue
-        bank, n = int(r["bank"], 16), int(r["n"])
         for key in ("top", "bottom"):
-            off = bank * 0x8000 + int(r[key], 16) - 0x8000
-            for w in struct.unpack_from("<%dH" % n, rom, off):
+            for w in L.row_words(rom, r, key):
                 tiles.add(w & 0x3FF)
-    for ch in RESERVED_GLYPHS:
-        k = KANJI16.index(ch)
+    for k in [KANJI16.index(ch) for ch in RESERVED_GLYPHS] + list(RESERVED_INDICES):
         tl = 0x100 + (k // 8) * 0x20 + (k % 8) * 2
         tiles.update((tl, tl + 1, tl + 0x10, tl + 0x11))
     bits = bytearray(64)
@@ -295,7 +317,7 @@ def shift_table(rows, gs):
     return bytes(out)
 
 
-def build(original, csv_path=None, labels_csv=None, ingame_csv=None, teams_csv=None, bg2_csv=None,
+def build(original, csv_path=None, labels_csv=None, ingame_csv=None, bg2_csv=None,
           roster_csv=None, static8_csv=None, rows8_csv=None, sprtext_csv=None, titles_csv=None, log=print):
     if hashlib.md5(original).hexdigest() != ORIGINAL_MD5:
         raise BuildError("original ROM md5 mismatch")
@@ -327,7 +349,10 @@ def build(original, csv_path=None, labels_csv=None, ingame_csv=None, teams_csv=N
     if GLYPH_ROM + len(bitmaps) > ROM_SIZE:
         raise BuildError("glyph bitmaps do not fit")
     for r in label_rows:
-        px = sum(width_of.get(c, 12) if c != " " else encode.SPACE_W for c in r["korean"])
+        if r["id"].startswith(NARROW_PREFIX):
+            px = 8 * len(r["korean"])
+        else:
+            px = sum(width_of.get(c, 12) if c != " " else encode.SPACE_W for c in r["korean"])
         if px > int(r["n"]) * 8:
             log("label too wide (%dpx > %dpx): %s %s" % (px, int(r["n"]) * 8, r["id"], r["korean"]))
     code = assemble([("SURNAME_TABLE", table_addr["surname"]), ("ITEM_TABLE", table_addr["item"]),
@@ -364,9 +389,10 @@ def build(original, csv_path=None, labels_csv=None, ingame_csv=None, teams_csv=N
     ltab = label_table(label_rows, gs)
     rom[LABEL_TABLE_ROM:LABEL_TABLE_ROM + len(ltab)] = ltab
     bg2.apply(rom, load_ingame(bg2_csv), log)
-    team_tiles = grid.encode(rom, load_ingame(teams_csv))
-    rom[RESERVED_ROM:RESERVED_ROM + 64] = reserved_bitmap(original, L.extract(original), label_rows, team_tiles)
+    rom[RESERVED_ROM:RESERVED_ROM + 64] = reserved_bitmap(original, L.extract(original), label_rows)
     mark_labels(rom, label_rows)
+    mtab = maplabel_table(original, label_rows)
+    rom[MAPLABEL_ROM:MAPLABEL_ROM + len(mtab)] = mtab
     korean_kanji16(rom)
     spr = sprtext.build_table(load_ingame(sprtext_csv))
     if len(spr) > SPRTEXT_BITMAP_ROM - SPRTEXT_ROM:
@@ -394,7 +420,6 @@ def main():
     csv_path = os.path.join(ROOT, "translations", "strings.csv")
     labels_csv = os.path.join(ROOT, "translations", "labels.csv")
     ingame_csv = os.path.join(ROOT, "translations", "ingame.csv")
-    teams_csv = os.path.join(ROOT, "translations", "teams.csv")
     bg2_csv = os.path.join(ROOT, "translations", "bg2.csv")
     roster_csv = os.path.join(ROOT, "translations", "roster.csv")
     static8_csv = os.path.join(ROOT, "translations", "static8.csv")
@@ -404,7 +429,7 @@ def main():
     if "--csv" in sys.argv:
         csv_path = sys.argv[sys.argv.index("--csv") + 1]
     original = open(args[0], "rb").read()
-    rom, _ = build(original, csv_path, labels_csv, ingame_csv, teams_csv, bg2_csv, roster_csv, static8_csv, rows8_csv, sprtext_csv, titles_csv)
+    rom, _ = build(original, csv_path, labels_csv, ingame_csv, bg2_csv, roster_csv, static8_csv, rows8_csv, sprtext_csv, titles_csv)
     open(args[1], "wb").write(rom)
     print("wrote", args[1], len(rom), "bytes")
 
