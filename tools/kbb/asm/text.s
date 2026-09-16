@@ -813,6 +813,20 @@ kbb_label_row:
         plp
         rtl
 
+; Carry set when the 16x16 label pool can be used. During a match (BG3 character base 6) its
+; tiles would land inside BG1's tilemap at VRAM $F840, so those rows are left to the game and
+; show the Korean 16x16 glyphs instead (see kanji16.KOREAN16).
+pool_ready:
+        lda f:BG34NBA_SHADOW
+        and #$0007
+        beq @yes
+        cmp #2
+        beq @yes
+        clc
+        rts
+@yes:   sec
+        rts
+
 ; A = row address, Y = bank. Carry set and A = T_VAL (label id + row flag) when that row is a
 ; translated label. Independent of DP, DB and the row's own contents.
 site_find:
@@ -820,6 +834,10 @@ site_find:
         tya
         and #$007F              ; the game reaches ROM through the $80+ mirrors too
         sta f:T_BANK
+        jsr pool_ready
+        bcs @ok
+        rts
+@ok:
         lda f:LABELSITES
         sta f:T_CNT
         ldx #2
@@ -2436,6 +2454,10 @@ kbb_sheet2:
 ; original first word of a MAPLABELS entry are redrawn from the label pool (top row at the
 ; entry's offset, bottom row 64 bytes below).
 map_labels:
+        jsr pool_ready
+        bcs @have_pool
+        rts
+@have_pool:
         lda f:MAPLABELS
         sta z_tmp
         lda #0
