@@ -1750,7 +1750,7 @@ kbb_roster_w4:
         phx
         jsr get_index
         phy
-        jsr m_get
+        jsr x_get
         ply
         plx
         pha
@@ -1800,7 +1800,7 @@ kbb_roster_full7f:
         phx
         jsr get_index
         phy
-        jsr m_get
+        jsr x_get
         ply
         plx
         ora #$2000
@@ -1842,7 +1842,7 @@ roster_cells:
         phx
         jsr get_index
         phy
-        jsr m_get
+        jsr x_get
         ply
         plx
         ora f:$7E719F
@@ -1876,6 +1876,19 @@ roster_put:
         inc
         tax
         rts
+
+; A = glyph id -> tile: the in-game cache while a match screen is up (BG3 base nibble 6,
+; e.g. the time-out menu), the menu cache otherwise.
+x_get:
+        pha
+        lda f:BG34NBA_SHADOW
+        and #$0007
+        cmp #6
+        beq @game
+        pla
+        jmp m_get
+@game:  pla
+        jmp d_get
 
 ; A = glyph id -> A = menu font tile (kana column slot); like d_get with its own map.
 m_get:
@@ -2046,7 +2059,7 @@ kbb_queue:
         phx
         jsr get_index
         phy
-        jsr m_get
+        jsr x_get
         ply
         plx
         bra @put

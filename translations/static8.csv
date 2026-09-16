@@ -1,26 +1,4 @@
 id,offset,n,japanese,korean
-pos_0,014C8E,9,ピッチャー(1),투수(1)
-pos_mark_0,014BDA,9,(dakuten marks), 
-pos_1,014CA0,9,キャッチャー(2),포수(2)
-pos_mark_1,014BEC,9,(dakuten marks), 
-pos_2,014CB2,9,ファースト(3),1루수(3)
-pos_mark_2,014BFE,9,(dakuten marks), 
-pos_3,014CC4,9,セカンド(4),2루수(4)
-pos_mark_3,014C10,9,(dakuten marks), 
-pos_4,014CD6,9,サード(5),3루수(5)
-pos_mark_4,014C22,9,(dakuten marks), 
-pos_5,014CE8,9,ショート(6),유격수(6)
-pos_mark_5,014C34,9,(dakuten marks), 
-pos_6,014CFA,9,レフト(7),좌익수(7)
-pos_mark_6,014C46,9,(dakuten marks), 
-pos_7,014D0C,9,センター(8),중견수(8)
-pos_mark_7,014C58,9,(dakuten marks), 
-pos_8,014D1E,9,ライト(9),우익수(9)
-pos_mark_8,014C6A,9,(dakuten marks), 
-cancel_a,0142AA,3,やめる,취소
-ok_a,0142B0,4,けってい,결정
-cancel_b,0124E8,3,やめる,취소
-ok_b,0124F2,4,けってい,결정
 bench_0,0124CA,2,控.,후.
 bench_1,0124CE,2,控.,후.
 bench_2,0124D2,2,控.,후.

@@ -231,8 +231,10 @@ def reserved_bitmap(rom, all_rows, translated, extra=()):
 def korean_kanji16(rom):
     """Draw Korean syllables over the 16x16 kanji glyphs listed in kanji16.KOREAN16 (in place)."""
     from tools.kbb import font, glyphs
-    from tools.kbb.kanji16 import KANJI16, KOREAN16
-    for ch, ko in KOREAN16.items():
+    from tools.kbb.kanji16 import KANJI16, KOREAN16, KOREAN16_IDX
+    items = [([i for i, c in enumerate(KANJI16) if c == ch], ko) for ch, ko in KOREAN16.items()]
+    items += [((n,), ko) for n, ko in KOREAN16_IDX.items()]
+    for indices, ko in items:
         if len(ko) == 2:                      # two 8px syllables side by side, stretched to 16 rows
             px = [[0] * 16 for _ in range(16)]
             for i, c in enumerate(ko):
@@ -245,7 +247,7 @@ def korean_kanji16(rom):
             dw, cell = glyphs.render(ko)
             shift = (16 - dw) // 2
             px = [[3 if (v >> shift) & (0x8000 >> x) else 0 for x in range(16)] for v in cell]
-        for n in (i for i, c in enumerate(KANJI16) if c == ch):
+        for n in indices:
             tl = 0x100 + (n // 8) * 0x20 + (n % 8) * 2
             for t, (ox, oy) in zip((tl, tl + 1, tl + 0x10, tl + 0x11), ((0, 0), (8, 0), (0, 8), (8, 8))):
                 off = font.FONT_OFFSET + t * font.TILE_BYTES
