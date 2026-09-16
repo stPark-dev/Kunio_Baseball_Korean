@@ -13,8 +13,10 @@ team_10,glyph,,"82,83,92,93",谷,타
 team_11,glyph,,"e2,e3,f2,f3",服,핫
 team_12,glyph,,"e4,e5,f4,f5",米,전
 inning_kai,glyph,,"e6,85,f6,95",回,회
+inning_kai_dup,copy,,"85>a4,95>b4",回の右半分, 
 inning_omote,glyph,,"86,87,96,97",表,초
-inning_ura,glyph,,"a4,a5,b4,b5",裏,말
+inning_ura,half,,"a5,b5",裏,말
+inning_tail,blank,,b6,ラの右半分, 
 stat_防率,overlay,,02F9D2,防率,방어율
 stat_投数,overlay,,02F9F2,投数,투구수
 stat_打率,overlay,,02FA12,打率,타율

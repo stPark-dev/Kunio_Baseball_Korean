@@ -451,6 +451,7 @@ def build(original, csv_path=None, labels_csv=None, ingame_csv=None, bg2_csv=Non
     mtab = maplabel_table(original, label_rows)
     rom[MAPLABEL_ROM:MAPLABEL_ROM + len(mtab)] = mtab
     korean_kanji16(rom)
+    sprtext.patch_sprite_glyphs(rom)
     spr = sprtext.build_table(load_ingame(sprtext_csv))
     if len(spr) > SPRTEXT_BITMAP_ROM - SPRTEXT_ROM:
         raise BuildError("sprite-text table too large")

@@ -4,7 +4,10 @@ Two 256-tile sets exist in ROM: TILESETS["A"] for the pitch/bat view and TILESET
 the field view; both keep the scoreboard elements (digits, inning label, team abbreviations,
 OUT counter) at the same tile numbers. Text is drawn three ways:
 
-- glyph:   a 16x16 kanji redrawn in place (team abbreviation, 回/表/裏), in both sets.
+- glyph:   a 16x16 kanji redrawn in place (team abbreviation, 表, 裏), in both sets.
+- half:    an 8x16 syllable (the inning counter's 回); `target` lists one or more top,bottom pairs.
+- blank:   tiles wiped clean, for the parts of a replaced image that nothing draws any more.
+- copy:    a tile duplicated into a second slot ("src>dst"), for images the game stores twice.
 - overlay: a stats-overlay label row pair (`$85:F9D2`...: 8 words per row, label in the first
            4-5 columns, digits after). Redrawn with the 8px font stretched to 8x16 like the
            digits, one column per syllable, and the row words repointed. Same tiles in both sets.
@@ -143,6 +146,18 @@ def banner_tiles(text):
     return slice_tiles(canvas)
 
 
+def half_tiles(ch):
+    """(top, bottom) tiles of one 8x16 syllable: the inning counter's 回 is half width."""
+    ink = [[0] * 8 for _ in range(16)]
+    cell = font8.render8(ch)
+    if cell is not None:
+        for y in range(8):
+            for x in range(8):
+                if cell[y][x]:
+                    ink[y * 2][x] = ink[y * 2 + 1][x] = 1
+    return slice_tiles(kanji_style(ink))
+
+
 def overlay_tiles(text):
     """Stats label: one 8x16 column per syllable (Galmuri7 stretched 2x vertically)."""
     if len(text) > OVERLAY_COLS:
@@ -188,6 +203,24 @@ def apply(rom, rows, log=print):
     """Draw every translated row of translations/bg2.csv into `rom` (bytearray, in place)."""
     todo = [r for r in rows if r.get("korean")]
     for r in todo:
+        if r["kind"] == "copy":                     # second copy of a tile (see inning_kai_dup)
+            for pair in r["target"].split(","):
+                src, dst = (int(t, 16) for t in pair.split(">"))
+                for base in TILESETS.values():
+                    rom[base + dst * 32:base + dst * 32 + 32] = rom[base + src * 32:base + src * 32 + 32]
+            continue
+        if r["kind"] == "blank":                    # leftovers of a replaced image (see inning_tail)
+            for t in (int(t, 16) for t in r["target"].split(",")):
+                for base in TILESETS.values():
+                    rom[base + t * 32:base + t * 32 + 32] = bytes(32)
+            continue
+        if r["kind"] == "half":                     # 8x16 syllable, drawn into every listed pair
+            data = half_tiles(r["korean"])
+            for pair in r["target"].split("|"):
+                for t, d in zip((int(t, 16) for t in pair.split(",")), data):
+                    for key, base in TILESETS.items():
+                        rom[base + t * 32:base + t * 32 + 32] = with_background(d, BACKGROUND[key])
+            continue
         if r["kind"] != "glyph":
             continue
         tiles = [int(t, 16) for t in r["target"].split(",")]

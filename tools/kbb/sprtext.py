@@ -60,6 +60,40 @@ def quadrants(px, bg=BG):
     return out
 
 
+# 16x16 sprite glyphs stored uncompressed in ROM, as (tl, tr, bl, br) tile offsets. The guts hit
+# shows 根性 over the field; its tiles sit in bank $A8 in reverse order.
+SPRITE_GLYPHS = [("근", (0x1421C0, 0x1421A0, 0x142140, 0x142120)),
+                 ("성", (0x142180, 0x142160, 0x142100, 0x1420E0))]
+SPRITE_INK, SPRITE_SHADOW = 12, 15
+
+
+def sprite_glyph(ch):
+    """(tl, tr, bl, br) tiles of one 16x16 sprite syllable: strokes with a drop shadow."""
+    g = glyphs.render(ch)
+    dw, cell = g if g else (12, [0] * 16)
+    shift = (16 - dw) // 2
+    px = [[0] * 16 for _ in range(16)]
+    for y in range(16):
+        for x in range(16):
+            if x >= shift and (cell[y] >> (15 - (x - shift))) & 1:
+                px[y][x] = SPRITE_INK
+    for y in range(15, -1, -1):
+        for x in range(15, -1, -1):
+            if px[y][x] == SPRITE_INK:
+                for dy, dx in ((1, 0), (0, 1), (1, 1)):
+                    if y + dy < 16 and x + dx < 16 and px[y + dy][x + dx] == 0:
+                        px[y + dy][x + dx] = SPRITE_SHADOW
+    return [encode4([[px[oy + y][ox + x] for x in range(8)] for y in range(8)])
+            for oy, ox in ((0, 0), (0, 8), (8, 0), (8, 8))]
+
+
+def patch_sprite_glyphs(rom):
+    """Redraw the uncompressed 16x16 sprite glyphs listed in SPRITE_GLYPHS."""
+    for ch, offsets in SPRITE_GLYPHS:
+        for off, data in zip(offsets, sprite_glyph(ch)):
+            rom[off:off + TILE] = data
+
+
 def first_word_bitmap(table):
     """8 KB bitmap indexed by a tile's first word: set when some signature starts with that word.
     The asm scan skips every tile whose bit is clear, so only real candidates are compared."""
