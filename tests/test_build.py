@@ -41,12 +41,10 @@ def test_label_table_and_marking():
     data = build.label_table(rows, gs)
     assert data[:2] == struct.pack("<H", 0xC002)
     assert data[2:] == gs.encode("가 나")
-    rom = bytearray(0x90000)
-    build.mark_labels(rom, rows)
-    top = 0x11 * 0x8000 + 3
-    assert struct.unpack_from("<H", rom, top)[0] == 0xC000
-    assert struct.unpack_from("<H", rom, top + 8)[0] == 0xD000
-    assert rom[top + 2:top + 8] == b"\x00" * 6
+    sites = build.label_sites(rows)
+    assert struct.unpack_from("<H", sites, 0)[0] == 2
+    assert struct.unpack_from("<BHH", sites, 2) == (0x11, 0x8003, 0)
+    assert struct.unpack_from("<BHH", sites, 7) == (0x11, 0x800B, build.LABEL_ROW_BOTTOM)
 
 
 def test_ingame_font_block_keeps_digits_and_places_static_syllables():
@@ -114,7 +112,7 @@ def test_label_kinds_grid_mvn_map(monkeypatch):
     assert labels.row_words(bytes(rom), t, "bottom")[0] == 0x2C00 | n[2]
 
 
-def test_label_table_narrow_flag_and_markers():
+def test_label_table_narrow_flag_and_sites():
     from tools.kbb import build, encode
     rows = [{"id": "site_1", "bank": "10", "top": "A000", "bottom": "A010", "n": 2, "korean": "가"},
             {"id": "grid_00", "bank": "11", "top": "C493", "bottom": "C49B", "n": 4, "korean": "나다"},
@@ -123,14 +121,11 @@ def test_label_table_narrow_flag_and_markers():
     tab = build.label_table(rows, gs)
     p0, p1, p2 = struct.unpack_from("<3H", tab, 0)
     assert tab[p0 - 0xC000] != 1 and tab[p1 - 0xC000] == 1 and tab[p2 - 0xC000] != 1
-    rom = bytearray(0x100000)
-    struct.pack_into("<2H", rom, 0x82000, 0x2D86, 0x2D87)
-    struct.pack_into("<4H", rom, 0x8C493, 1, 2, 3, 4)
-    build.mark_labels(rom, rows)
-    assert struct.unpack_from("<2H", rom, 0x82000) == (0xC000, 0x2D87)      # marker, attribute word kept
-    assert struct.unpack_from("<2H", rom, 0x82010) == (0xD000, 0)
-    assert struct.unpack_from("<4H", rom, 0x8C493) == (0xC001, 2, 3, 4)
-    assert not any(rom[0x1C8:0x1CA])                                        # bank-7F rows are not marked
+    sites = build.label_sites(rows)
+    assert struct.unpack_from("<H", sites, 0)[0] == 4                       # the bank-7F row has no site
+    assert struct.unpack_from("<BHH", sites, 2) == (0x10, 0xA000, 0)
+    assert struct.unpack_from("<BHH", sites, 7) == (0x10, 0xA010, build.LABEL_ROW_BOTTOM)
+    assert struct.unpack_from("<BHH", sites, 12) == (0x11, 0xC493, 1)
 
 
 def test_maplabel_table(monkeypatch):

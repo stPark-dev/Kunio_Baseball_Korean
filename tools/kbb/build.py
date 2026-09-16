@@ -45,6 +45,8 @@ SHEET_HOOK_ROM = 0x00858A                    # $81:858A, LDA $22 / BEQ before th
 SHEET2_HOOK_ROM = 0x0092FE                   # $81:92FE, the scene script's cmd 1C VRAM upload
 MVN_HOOK_ROM = 0x084A94                      # $90:CA94, MVN row copier (X = ROM row, Y = $7F destination)
 MAPLABEL_ROM = 0x1A6000                      # $B4:E000: labels inside compressed tilemaps (offset, word, n, id)
+LABELSITE_ROM = 0x1A6800                     # $B4:E800: (bank, address) -> label id of every translated row
+LABELSITE_LIMIT = 0x1800
 NARROW_PREFIX = "grid_"                      # labels drawn with the 8px font (team grid cells are 32px wide)
 TABLE_LIST = ("surname", "name_extra1", "name_extra2", "name_set3", "name_set4", "name_set5", "item")
 MENU_POOL = [t for t in range(256) if t & 0xF in (0x9, 0xA, 0xB, 0xD, 0xE, 0xF) and t != 0x0D]
@@ -71,7 +73,7 @@ RESERVED_GLYPHS = "熱血野球大会対先発火小変更打順守備選手デ�
 # 野次気合 / アイテム of the time-out menu (see kanji16.KOREAN16_IDX)
 RESERVED_INDICES = (0x57, 0x5F, 0x67, 0x6F, 0x77, 0x7B, 0x49, 0x41, 0x42, 0x43, 0x44, 0x07, 0x47, 0x4F)
 LABEL_TABLE_LIMIT = 0x4000
-LABEL_MARK_TOP, LABEL_MARK_BOTTOM = 0xC000, 0xD000
+LABEL_ROW_BOTTOM = 0x1000                    # set in a site entry for the bottom row of a pair
 ROW_WRITER_ROM = 0x08B390
 
 WIDE_PX = 248          # dialogue window: columns 1..31
@@ -206,16 +208,23 @@ def label_table(rows, gs):
     return data
 
 
-def mark_labels(rom, rows):
-    """Put a marker word in front of each translated ROM row pair (see asm/text.s); the rest of
-    the row stays (the MVN hook takes the attribute bits from the second word)."""
+def label_sites(rows):
+    """[u16 count][entries: u8 bank, u16 row address, u16 id (+$1000 for the bottom row)].
+
+    The row hooks recognise a translated row by its address. An earlier version wrote a marker
+    word into the row instead, but ordinary graphics rows whose first tile is mirrored carry the
+    same bit pattern, so unrelated screens were redrawn as garbage."""
+    entries = []
     for lid, r in enumerate(rows):
         if r["bank"] == "7F":
             continue
         bank = int(r["bank"], 16)
-        for key, mark in (("top", LABEL_MARK_TOP), ("bottom", LABEL_MARK_BOTTOM)):
-            off = bank * 0x8000 + int(r[key], 16) - 0x8000
-            struct.pack_into("<H", rom, off, mark | lid)
+        for key, flag in (("top", 0), ("bottom", LABEL_ROW_BOTTOM)):
+            entries.append(struct.pack("<BHH", bank, int(r[key], 16), lid | flag))
+    data = struct.pack("<H", len(entries)) + b"".join(entries)
+    if len(data) > LABELSITE_LIMIT:
+        raise BuildError("label site table overflow")
+    return data
 
 
 def maplabel_table(original, rows):
@@ -390,7 +399,8 @@ def build(original, csv_path=None, labels_csv=None, ingame_csv=None, bg2_csv=Non
     rom[LABEL_TABLE_ROM:LABEL_TABLE_ROM + len(ltab)] = ltab
     bg2.apply(rom, load_ingame(bg2_csv), log)
     rom[RESERVED_ROM:RESERVED_ROM + 64] = reserved_bitmap(original, L.extract(original), label_rows)
-    mark_labels(rom, label_rows)
+    stab = label_sites(label_rows)
+    rom[LABELSITE_ROM:LABELSITE_ROM + len(stab)] = stab
     mtab = maplabel_table(original, label_rows)
     rom[MAPLABEL_ROM:MAPLABEL_ROM + len(mtab)] = mtab
     korean_kanji16(rom)

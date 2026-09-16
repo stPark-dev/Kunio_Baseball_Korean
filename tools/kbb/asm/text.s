@@ -118,6 +118,11 @@ QUEUE_CONT = $80F102            ; after the replaced PHP / PHB / PEA $007E
 SPRTEXT = $B48000               ; u16 count, entries of (32-byte signature, 32-byte Korean tile)
 SPRBITS = $B4C000               ; 8 KB bitmap of signature first words (quick reject)
 MAPLABELS = $B4E000             ; u16 count, entries (u16 buffer offset, u16 original word, u16 n, u16 label id)
+LABELSITES = $B4E800            ; u16 count, entries (u8 bank, u16 row address, u16 id + $1000 for row 2)
+T_ADDR  = $7E8C28               ; site_find scratch
+T_BANK  = $7E8C2A
+T_CNT   = $7E8C2C
+T_VAL   = $7E8C2E               ; site_find result (label id + row flag)
 MVN_CONT = $90CA98              ; after the replaced PHP / PHB / REP #$30 of the MVN row copier
 S_WORD  = $7E8C26
 S_TILE  = $7E9BF8
@@ -819,11 +824,20 @@ kbb_label_row:
         rep #$30
         pha
         phx
-        tax
-        lda a:$0000,x           ; word 0 of the row data (caller's DB)
-        and #$C000
-        cmp #$C000
-        beq @marked
+        phy
+        lda #0
+        sta f:T_BANK
+        sep #$20
+        phb
+        pla
+        sta f:T_BANK            ; the row data bank is the caller's DB
+        rep #$30
+        lda f:T_BANK
+        tay
+        lda 5,s                 ; the saved A: the row data address
+        jsr site_find
+        bcs @marked
+        ply
         plx
         pla
         plp
@@ -833,13 +847,13 @@ kbb_label_row:
         rep #$30
         jml ORIG_ROW_WRITER
 @marked:
-        lda a:$0000,x             ; marker word
-        phy
         phb
         phd
         pea Z
         pld
         ; stack from S+1: D(2) B(1) Y(2) X(2) A(2) P(1) ret(3) n(2) attr(2)
+        lda f:T_VAL
+        ora #$C000
         sta z_tpl
         and #$0FFF
         sta z_id
@@ -860,6 +874,39 @@ kbb_label_row:
         pla
         plp
         rtl
+
+; A = row address, Y = bank. Carry set and A = T_VAL (label id + row flag) when that row is a
+; translated label. Independent of DP, DB and the row's own contents.
+site_find:
+        sta f:T_ADDR
+        tya
+        and #$007F              ; the game reaches ROM through the $80+ mirrors too
+        sta f:T_BANK
+        lda f:LABELSITES
+        sta f:T_CNT
+        ldx #2
+@loop:  lda f:T_CNT
+        beq @miss
+        dec
+        sta f:T_CNT
+        lda f:LABELSITES,x
+        and #$00FF
+        cmp f:T_BANK
+        bne @next
+        lda f:LABELSITES+1,x
+        cmp f:T_ADDR
+        beq @hit
+@next:  txa
+        clc
+        adc #5
+        tax
+        bra @loop
+@hit:   lda f:LABELSITES+3,x
+        sta f:T_VAL
+        sec
+        rts
+@miss:  clc
+        rts
 
 ; DP = Z. Draws label z_id (top or bottom row per z_tpl bit 12) at z_x/z_y, z_n cells.
 label_body:
@@ -2129,10 +2176,11 @@ kbb_queue:
         sta f:Q_X
         tya
         sta f:Q_Y
-        lda a:$0000,x           ; a label marker: draw from the pool (16x16 menu rows)
-        and #$E000
-        cmp #$C000
-        bne @rows8
+        lda f:Q_DB              ; a translated 16x16 row: draw it from the label pool
+        tay
+        lda f:Q_X
+        jsr site_find
+        bcc @rows8
         jmp q_label
 @rows8: lda f:ROWS8
         sta f:Q_CNT
@@ -2273,13 +2321,14 @@ q_label:
         phd
         pea Z
         pld
-        lda f:Q_X
-        tax
-        lda a:$0000,x
+        lda f:T_VAL
+        ora #$C000
         sta z_tpl
         and #$0FFF
         sta z_id
-        lda a:$0002,x
+        lda f:Q_X
+        tax
+        lda a:$0000,x           ; the row's own attribute bits
         and #$FC00
         sta z_attr
         lda f:Q_A
@@ -2517,16 +2566,17 @@ kbb_mvn:
         beq @pass
         cmp #$007F
         beq @pass
+        tay                     ; Y = source bank
         sep #$20
         pha
         plb                     ; DB = source bank
         rep #$20
-        lda a:$0000,x
-        and #$E000
-        cmp #$C000
-        bne @pass
-        lda a:$0000,x
-        pha                     ; marker
+        txa
+        jsr site_find
+        bcc @pass
+        lda f:T_VAL
+        ora #$C000
+        pha                     ; label id + row flag
         lda a:$0002,x
         and #$FC00
         pha                     ; attribute bits of the row
