@@ -159,6 +159,67 @@ def sprite_patches(tiles):
     return [(SPRITE_ROM + i * 32, tiles[t]) for i, t in enumerate(SPRITE_ORDER) if t in tiles]
 
 
+# The game over screen writes げーむ おーばー with a 24x24 font of its own (three tile rows of the
+# sheet at $9B:8000, placed by the tilemap at $92:9C99). Korean goes into free tiles of that sheet.
+# Four screens share this sheet, so the nine tiles of each syllable go into different free runs.
+GAMEOVER = dict(text="게임 오버", row=20, col=9, blocks=(0x130, 0x0B0, 0x112, 0x152),
+                ink=1, back=2, blank=0x2D00, attr=0x2C00, wipe=(7, 26))
+
+
+def block_tiles(ch, back, ink):
+    """Nine 8x8 tiles of one 24x24 syllable drawn in `ink` on `back`."""
+    g = bolder(scaled_glyph(ch, 24, 24))
+    px = [[ink if g[y][x] else back for x in range(24)] for y in range(24)]
+    return [encode_tile([row[c * 8:c * 8 + 8] for row in px[r * 8:r * 8 + 8]])
+            for r in range(3) for c in range(3)]
+
+
+# The same screen greets the player with おつかれさま above the picture: nine tiles by two rows.
+THANKS = dict(text="수고하셨어요", fill=13, shade=14,
+              tiles=(0x10D, 0x10E, 0x10F, 0x12D, 0x12E, 0x12F, 0x14D, 0x14E, 0x14F,
+                     0x11D, 0x11E, 0x11F, 0x13D, 0x13E, 0x13F, 0x15D, 0x15E, 0x15F))
+
+
+def thanks():
+    """{sheet byte offset: 32 bytes} for the greeting, drawn at the font's own 12px pitch."""
+    t = THANKS
+    ink = proportional_ink(t["text"], 9 * 8, 16)
+    px = [[t["fill"] if v else 0 for v in row] for row in ink]
+    for y in range(15, -1, -1):
+        for x in range(9 * 8 - 1, -1, -1):
+            if px[y][x] == t["fill"]:
+                for dy, dx in ((1, 0), (0, 1), (1, 1)):
+                    if y + dy < 16 and x + dx < 9 * 8 and px[y + dy][x + dx] == 0:
+                        px[y + dy][x + dx] = t["shade"]
+    out = {}
+    for i, tile in enumerate(t["tiles"]):
+        r, c = i // 9, i % 9
+        out[tile * 32] = encode_tile([row[c * 8:c * 8 + 8] for row in px[r * 8:r * 8 + 8]])
+    return out
+
+
+def gameover():
+    """({sheet byte offset: 32 bytes}, {tilemap byte offset: word}) for the game over line."""
+    g = GAMEOVER
+    tiles, tmap = {}, {}
+    col, block = g["col"], iter(g["blocks"])
+    for ch in g["text"]:
+        if ch == " ":
+            col += 2
+            continue
+        t = next(block)
+        for i, data in enumerate(block_tiles(ch, g["back"], g["ink"])):
+            tiles[(t + i) * 32] = data
+        for r in range(3):
+            for c in range(3):
+                tmap[((g["row"] + r) * 32 + col + c) * 2] = g["attr"] | (t + r * 3 + c)
+        col += 3
+    for r in range(3):                       # wipe the cells the Japanese line used
+        for c in range(*g["wipe"]):
+            tmap.setdefault(((g["row"] + r) * 32 + c) * 2, g["blank"])
+    return tiles, tmap
+
+
 def build():
     """(tile number -> 32 bytes, tilemap word offset -> word) for the whole logo."""
     tiles, tmap = {}, {}

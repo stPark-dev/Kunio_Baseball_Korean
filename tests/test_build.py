@@ -77,7 +77,7 @@ def test_kanji16_glyphs_are_replaced_with_centered_hangul():
     expect = [[3 if (v >> shift) & (0x8000 >> x) else 0 for x in range(16)] for v in cell]
     assert rows == expect
     assert any(3 in r for r in rows)
-    untouched = kanji16.KANJI16.index("け")
+    untouched = kanji16.KANJI16.index("練")      # a glyph no screen needs, so it is never redrawn
     assert font.glyph16(rom, untouched) == [[0] * 16] * 16
 
 

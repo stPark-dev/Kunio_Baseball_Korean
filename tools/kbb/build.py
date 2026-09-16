@@ -49,8 +49,11 @@ MAPLABEL_ROM = 0x1A6000                      # $B4:E000: labels inside compresse
 LABELSITE_ROM = 0x1A6800                     # $B4:E800: (bank, address) -> label id of every translated row
 BLOB_ROM = 0x1A7000                          # $B4:F000: (destination, length, source) of each $7F buffer patch
 LOGO_ROM = 0x1A8000                          # $B5:8000: the Korean title logo tiles and tilemap rows
-LOGO_SHEET = (0x9BB823, 0x9BF21D, 0x4000, 0x2000, 0xE000)   # stream, dictionary, offset, length, $7F address
+# (stream, dictionary, buffer offset, length, $7F address) of every run we overwrite at run time
+LOGO_SHEET = (0x9BB823, 0x9BF21D, 0x4000, 0x2000, 0xE000)
 LOGO_MAP = (0x939260, 0x93B8AB, 0x01C0, 0x0300, 0x89C0)
+OVER_SHEET = (0x9B8000, 0x9BF21D, 0x0000, 0x2C00, 0xC000)   # four screens share this sheet
+OVER_MAP = (0x929C99, 0x92AB05, 0x0500, 0x00C0, 0x8500)
 LABELSITE_LIMIT = 0x1800
 CENTRE_PREFIX = "grid_"                      # labels centred in their cells (the team grid)
 GRID_N_SITES = (0x08C215, 0x08C238)          # PEA #4 operands: cells per team-name row in $91:C202
@@ -75,7 +78,7 @@ GAME_TEXT = True
 LABEL_TABLE_ROM = CODE_ROM + 0x4000          # $B1:C000, u16 string offsets then strings
 RESERVED_ROM = CODE_ROM + 0x3F00             # $B1:BF00, 64-byte bitmap of kanji tiles to keep
 # 16x16 glyphs drawn by screens whose data is not located yet (versus title, pre-game menu)
-RESERVED_GLYPHS = "熱血野球大会対先発火小変更打順守備選手デタ自敵チム第回戦交代使用野次気合"
+RESERVED_GLYPHS = "熱血野球大会対先発火小変更打順守備選手デタ自敵チム第回戦交代使用野次気合勝負ちけ"
 # glyph indices the reading table cannot name: 8x16 digit pairs 01..89, ［ ］ !, ・ (the "." of .225),
 # 野次気合 / アイテム of the time-out menu (see kanji16.KOREAN16_IDX)
 RESERVED_INDICES = (0x57, 0x5F, 0x67, 0x6F, 0x77, 0x7B, 0x49, 0x41, 0x42, 0x43, 0x44, 0x07, 0x47, 0x4F)
@@ -230,26 +233,34 @@ def widen_grid(rom):
         struct.pack_into("<H", rom, off + 4, name_x + labels.GRID_CELLS)
 
 
-def title_logo(original, rom):
-    """Put the Korean logo into bank $B5 and describe both patches in the blob table."""
+def screen_patches(original, rom):
+    """Korean art for screens whose graphics are compressed: put it in bank $B5 and describe each
+    run in the blob table that the cmd 1C hook copies from."""
     tiles, tmap = titlelogo.build()
     for off, tile in titlelogo.sprite_patches(tiles):
         rom[off:off + len(tile)] = tile
+    over_tiles, over_map = titlelogo.gameover()
+    over_tiles.update(titlelogo.thanks())
+    runs = ((LOGO_SHEET, {0x4000 + t * 32: d for t, d in tiles.items()}), (LOGO_MAP, tmap),
+            (OVER_SHEET, over_tiles), (OVER_MAP, over_map))
     blobs, data = [], bytearray()
-    for (stream, dic, off, length, dest), edit in ((LOGO_SHEET, tiles), (LOGO_MAP, tmap)):
+    for (stream, dic, off, length, dest), edit in runs:
         orig_buf = lz.decompress(original, lz.snes_to_rom(stream), lz.snes_to_rom(dic))
         buf = bytearray(orig_buf)[off:off + length]
         for key, value in edit.items():
             if isinstance(value, int):
                 struct.pack_into("<H", buf, key - off, value)
             else:
-                buf[key * 32:key * 32 + 32] = value
-        check = next(i for i in range(0, length - 1, 2) if buf[i] or buf[i + 1])
+                buf[key - off:key - off + len(value)] = value
+        check = next((i for i in range(0, length - 1, 2)         # a word the untouched sheet has here
+                      if orig_buf[off + i] and orig_buf[off + i + 1]),
+                     next(i for i in range(0, length - 1, 2)
+                          if orig_buf[off + i] or orig_buf[off + i + 1]))
         blobs.append(struct.pack("<5H", dest, length, 0x8000 + len(data), check,
                                  struct.unpack_from("<H", bytes(orig_buf), off + check)[0]))
         data += buf
     if LOGO_ROM + len(data) > ROM_SIZE:
-        raise BuildError("title logo does not fit")
+        raise BuildError("screen patches do not fit")
     rom[LOGO_ROM:LOGO_ROM + len(data)] = data
     return struct.pack("<H", len(blobs)) + b"".join(blobs)
 
@@ -444,7 +455,7 @@ def build(original, csv_path=None, labels_csv=None, ingame_csv=None, bg2_csv=Non
     rom[RESERVED_ROM:RESERVED_ROM + 64] = reserved_bitmap(original, L.extract(original), label_rows)
     if any(r["id"].startswith(CENTRE_PREFIX) for r in label_rows):
         widen_grid(rom)
-    btab = title_logo(original, rom)
+    btab = screen_patches(original, rom)
     rom[BLOB_ROM:BLOB_ROM + len(btab)] = btab
     stab = label_sites(label_rows)
     rom[LABELSITE_ROM:LABELSITE_ROM + len(stab)] = stab
