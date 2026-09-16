@@ -1484,18 +1484,14 @@ game_put_from:                  ; X = WRAM address of the cell word
         pea $7E7E
         plb
         plb
-@retry: lda f:G_CELL
+        lda f:G_CELL
         tay
         lda 2,s
         tax
         lda #2
-        jsl VRAM_QUEUE
-        bcc @ok
-        lda #0
-        jsl TASK_WAIT
-        bra @retry
-@ok:    plb
-        plx
+        jsl VRAM_QUEUE          ; carry set = queue full: the cell is dropped, never waited for.
+        plb                     ; The task switcher pops only its own frame and wants the stack
+        plx                     ; back at $1FFF, so yielding from here would corrupt it.
         lda f:G_CELL
         inc
         sta f:G_CELL

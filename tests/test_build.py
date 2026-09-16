@@ -307,3 +307,10 @@ def test_title_logo_never_writes_the_shared_blank_tile():
             for b in titlelogo.BLOCKS for r in range(b["rows"]) for c in range(b["cols"])]
     assert len(used) == len(set(used))                       # every cell has its own tile
     assert set(used).isdisjoint(titlelogo.SHARED_TILES)      # background blank tile stays intact
+
+
+def test_no_task_yield_from_nested_code():
+    # The game's task switcher ($80:EC8A) pops exactly its own frame and expects the stack
+    # back at $1FFF, so yielding from inside our nested calls corrupts it and crashes.
+    src = open("tools/kbb/asm/text.s", encoding="utf-8").read()
+    assert "jsl TASK_WAIT" not in src
