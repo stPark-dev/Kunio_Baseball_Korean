@@ -71,13 +71,42 @@ def first_word_bitmap(table):
     return bytes(bits)
 
 
+def group_cells(texts):
+    """One 16x16 ink matrix per cell for a title whose cells are adjacent on screen.
+
+    The whole string is laid out proportionally (Galmuri11) across cells * 16 pixels and then
+    cut back into cells, so a reading that needs more syllables than cells still looks even.
+    Only titles whose cells really do sit side by side may use this (`group` in the CSV);
+    most titles are drawn with gaps between the cells and stay one syllable per cell."""
+    text = "".join(texts)
+    width = 16 * len(texts)
+    glyph = [glyphs.render(c) or (12, [0] * 16) for c in text]
+    pen = max(0, (width - sum(dw for dw, _ in glyph)) // 2)
+    px = [[0] * width for _ in range(16)]
+    for dw, cell in glyph:
+        for y in range(16):
+            for x in range(dw):
+                if pen + x < width and (cell[y] >> (15 - x)) & 1:
+                    px[y][pen + x] = 1
+        pen += dw
+    return [[row[i * 16:(i + 1) * 16] for row in px] for i in range(len(texts))]
+
+
 def build_table(rows):
     """[u16 count][entries: 32-byte signature, 32-byte replacement]; blank quadrants are skipped."""
     entries = []
+    grouped = {}
+    for r in rows:
+        if r.get("group"):
+            grouped.setdefault(r["group"], []).append(r)
+    cells = {}
+    for members in grouped.values():
+        for r, px in zip(members, group_cells([m.get("korean", "") for m in members])):
+            cells[id(r)] = px
     for r in rows:
         if not r.get("korean"):
             continue
-        reps = quadrants(korean_cell(r["korean"]), int(r.get("bg") or BG))
+        reps = quadrants(cells.get(id(r)) or korean_cell(r["korean"]), int(r.get("bg") or BG))
         for key, rep in zip(("tl", "tr", "bl", "br"), reps):
             sig = bytes.fromhex(r[key])
             if len(sig) != TILE or not any(sig):
