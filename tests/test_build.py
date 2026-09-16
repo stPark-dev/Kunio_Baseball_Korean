@@ -233,3 +233,14 @@ def test_titlecard_draws_into_listed_tiles_only():
     assert all(v == 0 for r in tile(0x36b) for v in r)                       # '-' column untouched
     drawn = [v for t in (0x36a, 0x36c, 0x37a, 0x37b, 0x37c) for r in tile(t) for v in r]
     assert set(drawn) <= {titlecard.INK, titlecard.BG} and titlecard.INK in drawn
+
+
+def test_lz_decompressor_runs_and_backrefs():
+    from tools.kbb import lz
+    # stream: run of 1 byte repeated twice -> AA AA ; run of 2 bytes once -> 01 02 ; back-ref 3 bytes at dict+1
+    rom = bytearray(0x100)
+    dictionary = 0x80
+    rom[dictionary:dictionary + 4] = b"\x10\x11\x12\x13"
+    stream = bytes([0x21, 0xAA, 0x12, 0x01, 0x02, 0x80, 0x01, 0x00])
+    rom[0:len(stream)] = stream
+    assert lz.decompress(rom, 0, dictionary) == b"\xAA\xAA\x01\x02\x11\x12\x13"

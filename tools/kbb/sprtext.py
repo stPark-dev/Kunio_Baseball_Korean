@@ -3,7 +3,8 @@ compressed 4bpp sheet, decompressed by the game to $7F:B000 and uploaded by $81:
 The asm hook `kbb_sheet` scans that buffer before the DMA and replaces every 8x8 tile that
 matches a signature with its Korean tile, so the table is keyed by tile bitmaps and works in
 any scene that reuses the same glyph art. translations/sprtext.csv holds one row per glyph:
-kanji, korean, and the four quadrant tiles (tl, tr, bl, br) as hex."""
+kanji, korean, the four quadrant tiles (tl, tr, bl, br) as hex, and the box background colour
+(`bg`, 15 in most scenes, 13 in the hospital)."""
 import struct
 
 from tools.kbb import font8, glyphs
@@ -51,11 +52,11 @@ def korean_cell(text):
     return px
 
 
-def quadrants(px):
-    """(tl, tr, bl, br) 4bpp tiles of a 16x16 ink matrix drawn in INK."""
+def quadrants(px, bg=BG):
+    """(tl, tr, bl, br) 4bpp tiles of a 16x16 ink matrix drawn in INK on colour `bg`."""
     out = []
     for oy, ox in ((0, 0), (0, 8), (8, 0), (8, 8)):
-        out.append(encode4([[INK if px[oy + y][ox + x] else BG for x in range(8)] for y in range(8)]))
+        out.append(encode4([[INK if px[oy + y][ox + x] else bg for x in range(8)] for y in range(8)]))
     return out
 
 
@@ -65,7 +66,7 @@ def build_table(rows):
     for r in rows:
         if not r.get("korean"):
             continue
-        reps = quadrants(korean_cell(r["korean"]))
+        reps = quadrants(korean_cell(r["korean"]), int(r.get("bg") or BG))
         for key, rep in zip(("tl", "tr", "bl", "br"), reps):
             sig = bytes.fromhex(r[key])
             if len(sig) != TILE or not any(sig):
