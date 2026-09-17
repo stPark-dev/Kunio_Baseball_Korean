@@ -48,6 +48,23 @@ def decompress(rom, src, dictionary, limit=0x10000):
     return bytes(out[:limit])
 
 
+RUN_MAX = 0x7F                               # one extension byte plus a run byte: C7 1F ...
+
+
+def encode(data):
+    """`data` as a stream of plain runs, for buffers we rewrite and cannot compress again.
+
+    Only the run opcode is used, always with a repeat of 1, so no dictionary is read: the stream
+    can therefore sit in a bank of its own with the record pointing both source and dictionary
+    at it."""
+    out = bytearray()
+    for i in range(0, len(data), RUN_MAX):
+        chunk = data[i:i + RUN_MAX]
+        out += bytes((0xC0 | ((len(chunk) >> 4) & 7), 0x10 | (len(chunk) & 0x0F)))
+        out += chunk
+    return bytes(out) + b"\x00"
+
+
 def records(rom, banks=(0x00, 0x01)):
     """(rom offset of record, dest, source, dictionary) for every command-16 record in the script banks."""
     out = []

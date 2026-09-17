@@ -347,9 +347,9 @@ def test_victory_banners_cover_whole_tiles_in_their_own_colours():
     assert all(len(d) == 32 for d in tiles.values())
 
 
-def test_banner_glyph_fills_its_box():
-    from tools.kbb import titlelogo
-    g = titlelogo.banner_glyph("축", 13, 13)
+def test_stretched_glyph_fills_its_box():
+    from tools.kbb import glyphs
+    g = glyphs.stretch("축", 13, 13)
     assert len(g) == 13 and all(len(r) == 13 for r in g)
     assert any(g[0]) and any(g[-1])                       # ink touches top and bottom
     assert any(r[0] for r in g) and any(r[-1] for r in g)  # and both sides
@@ -373,3 +373,39 @@ def test_ending_tiles_keep_off_the_other_lines_of_the_sheet():
     assert ending.isdisjoint(titlelogo.GAMEOVER["blocks"])
     assert ending.isdisjoint(titlelogo.THANKS["tiles"])
     assert ending.isdisjoint({off // 32 for off in titlelogo.victory()})
+
+
+def test_lz_literal_encoder_round_trips():
+    from tools.kbb import lz
+    data = bytes(range(256)) * 9 + b"\x00\x01\x02"          # longer than one run, ends odd
+    stream = lz.encode(data)
+    rom = bytearray(0x4000)
+    rom[0x100:0x100 + len(stream)] = stream
+    assert lz.decompress(rom, 0x100, 0x2000, limit=len(data) + 16) == data
+    assert stream.endswith(b"\x00")                          # the decompressor's end marker
+
+
+def test_news_headline_fills_its_blocks_in_two_colours():
+    from tools.kbb import news, sprtext
+    tiles = news.tiles()
+    assert len(tiles) == news.CELLS * news.CELLS * len(news.TEXT)
+    assert all(len(d) == 32 for d in tiles.values())
+    drawn = {v for d in tiles.values() for row in sprtext.decode4(d) for v in row}
+    assert drawn == {news.BACK, news.INK}
+
+
+def test_news_map_blanks_the_band_and_places_the_blocks():
+    from tools.kbb import news
+    tmap = news.tilemap()
+    cells = {news.ROW * 32 + r * 32 + c for r in range(news.CELLS) for c in range(32)}
+    assert set(tmap) == {i * 2 for i in cells}
+    letters = {w for w in tmap.values() if w != news.BLANK}
+    assert letters == {news.ATTR | t for t in (off // 32 for off in news.tiles())}
+
+
+def test_news_record_is_a_command_16_for_the_headline_map():
+    from tools.kbb import lz, news
+    rom = bytearray(0x4000)
+    rom[news.MAP_RECORD:news.MAP_RECORD + 10] = news.record(news.MAP_STREAM, news.MAP_DICT)
+    assert rom[news.MAP_RECORD] == lz.CMD
+    assert news.record(0xB68000, 0xB68000)[4:] == bytes((0x00, 0x80, 0xB6, 0x00, 0x80, 0xB6))

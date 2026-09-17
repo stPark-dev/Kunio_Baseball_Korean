@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 
-from tools.kbb import bg2, encode, font8, glyphs, ingame, lz, rows8, script, sprtext, static8, text, titlecard, titlelogo
+from tools.kbb import bg2, encode, font8, glyphs, ingame, lz, news, rows8, script, sprtext, static8, text, titlecard, titlelogo
 from tools.kbb import labels
 from tools.kbb import labels as L
 
@@ -55,6 +55,8 @@ LOGO_SHEET = (0x9BB823, 0x9BF21D, 0x4000, 0x2000, 0xE000)
 LOGO_MAP = (0x939260, 0x93B8AB, 0x01C0, 0x0300, 0x89C0)
 OVER_SHEET = (0x9B8000, 0x9BF21D, 0x0000, 0x2C00, 0xC000)   # four screens share this sheet
 OVER_MAP = (0x929C99, 0x92AB05, 0x0500, 0x00C0, 0x8500)
+NEWS_ROM = 0x1B0000                          # $B6:8000, the newspaper headline tilemap stream
+NEWS_SNES = 0xB68000
 LABELSITE_LIMIT = 0x1800
 CENTRE_PREFIX = "grid_"                      # labels centred in their cells (the team grid)
 GRID_N_SITES = (0x08C215, 0x08C238)          # PEA #4 operands: cells per team-name row in $91:C202
@@ -250,7 +252,7 @@ def screen_patches(original, rom):
     over_tiles.update(titlelogo.victory())
     over_tiles.update(titlelogo.ending())
     runs = ((LOGO_SHEET, {0x4000 + t * 32: d for t, d in tiles.items()}), (LOGO_MAP, tmap),
-            (OVER_SHEET, over_tiles), (OVER_MAP, over_map))
+            (OVER_SHEET, over_tiles), (OVER_MAP, over_map), (news.sheet_run(), news.tiles()))
     blobs, data = [], bytearray()
     for (stream, dic, off, length, dest), edit in runs:
         orig_buf = lz.decompress(original, lz.snes_to_rom(stream), lz.snes_to_rom(dic))
@@ -468,6 +470,12 @@ def build(original, csv_path=None, labels_csv=None, ingame_csv=None, bg2_csv=Non
         widen_grid(rom)
     btab = screen_patches(original, rom)
     rom[BLOB_ROM:BLOB_ROM + len(btab)] = btab
+    stream = news.map_stream(original)
+    if len(stream) > 0x8000:
+        raise BuildError("newspaper tilemap stream does not fit its bank")
+    rom[NEWS_ROM:NEWS_ROM + len(stream)] = stream
+    apply_patches(rom, [(news.MAP_RECORD, news.record(news.MAP_STREAM, news.MAP_DICT),
+                         news.record(NEWS_SNES, NEWS_SNES))])
     stab = label_sites(label_rows)
     rom[LABELSITE_ROM:LABELSITE_ROM + len(stab)] = stab
     mtab = maplabel_table(original, label_rows)

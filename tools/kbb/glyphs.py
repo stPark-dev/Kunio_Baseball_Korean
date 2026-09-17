@@ -60,6 +60,20 @@ def render(ch, bdf=None):
     return dw, cell
 
 
+def stretch(ch, w, h, bdf=None):
+    """The glyph's ink box as a w x h 0/1 matrix.
+
+    Scaling the font's whole 16px cell would leave a Hangul syllable, which is 11px wide in it,
+    filling two thirds of the box. Lettering that is drawn rather than typeset -- a banner, a
+    headline, the ending card -- runs edge to edge, so the ink box is what gets stretched."""
+    _, cell = render(ch, bdf)
+    rows = [[(v >> (15 - x)) & 1 for x in range(CELL_H)] for v in cell]
+    ys = [y for y, r in enumerate(rows) if any(r)]
+    xs = [x for r in rows for x, v in enumerate(r) if v]
+    box = [r[min(xs):max(xs) + 1] for r in rows[ys[0]:ys[-1] + 1]]
+    return [[box[y * len(box) // h][x * len(box[0]) // w] for x in range(w)] for y in range(h)]
+
+
 def pack(cell):
     """16 row values -> 32 bytes, each row little-endian u16."""
     out = bytearray()

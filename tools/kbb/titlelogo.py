@@ -289,27 +289,13 @@ BANNERS = (dict(col=0, row=7, rows=6, back=1, x=1, w=13, h=13, top=3, pitch=15,
                 ink=(("축", 9), ("하", 9), ("해", 9))))
 
 
-def banner_glyph(ch, w, h):
-    """Galmuri11's glyph stretched to fill a w x h box.
-
-    `scaled_glyph` keeps the font's 16px cell, in which a Hangul syllable is 11px wide, so it
-    would leave a banner letter filling two thirds of the cloth. A painted banner runs edge to
-    edge, so the glyph's own ink box is what gets stretched."""
-    _, cell = glyphs.render(ch)
-    rows = [[(v >> (15 - x)) & 1 for x in range(16)] for v in cell]
-    ys = [y for y, r in enumerate(rows) if any(r)]
-    xs = [x for r in rows for x, v in enumerate(r) if v]
-    box = [r[min(xs):max(xs) + 1] for r in rows[ys[0]:ys[-1] + 1]]
-    return [[box[y * len(box) // h][x * len(box[0]) // w] for x in range(w)] for y in range(h)]
-
-
 def victory():
     """{sheet byte offset: 32 bytes} for the two banners of the victory screen."""
     out = {}
     for b in BANNERS:
         px = [[b["back"]] * 16 for _ in range(b["rows"] * 8)]
         for i, (ch, colour) in enumerate(b["ink"]):
-            for y, row in enumerate(banner_glyph(ch, b["w"], b["h"])):
+            for y, row in enumerate(glyphs.stretch(ch, b["w"], b["h"])):
                 for x, v in enumerate(row):
                     if v:
                         px[b["top"] + i * b["pitch"] + y][b["x"] + x] = colour
@@ -336,7 +322,7 @@ def ending():
     e = ENDING
     pad = (24 - e["size"]) // 2
     ink = [[0] * 24 for _ in range(24)]
-    for y, row in enumerate(banner_glyph(e["text"], e["size"], e["size"])):
+    for y, row in enumerate(glyphs.stretch(e["text"], e["size"], e["size"])):
         for x, v in enumerate(row):
             ink[pad + y][pad + x] = v
     px = [[v or e["back"] for v in row]
