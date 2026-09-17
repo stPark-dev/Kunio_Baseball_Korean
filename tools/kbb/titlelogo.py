@@ -18,7 +18,7 @@ belongs to the screen it sits on instead of looking like a shrunk drawing.
 import os
 import struct
 
-from tools.kbb import glyphs
+from tools.kbb import glyphs, lz
 
 ART = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
                    "assets", "title_logo.png")
@@ -207,11 +207,40 @@ def sprite_patches(tiles):
     return [(SPRITE_ROM + i * 32, tiles[t]) for i, t in enumerate(SPRITE_ORDER) if t in tiles]
 
 
+# Every tilemap that places tiles of the sheet at $9B:8000. Rows 20-22 are where the ending cards
+# and the game over line sit, i.e. the cells the patches below rewrite, so a tile used only there
+# is free for us: the four screens differ in nothing else.
+SHEET_MAPS = (0x928533, 0x9289B4, 0x928792, 0x928C49, 0x928953, 0x928CEE, 0x928E09,
+              0x929C99, 0x929DDA)
+SHEET_MAP_DICT = 0x92AB05
+SHEET_TILES = 0x200
+TEXT_ROWS = range(20, 23)
+
+
+def free_tiles(rom):
+    """Tiles of the shared sheet that no screen points at outside the rows we rewrite."""
+    used = set()
+    for src in SHEET_MAPS:
+        m = lz.decompress(rom, lz.snes_to_rom(src), lz.snes_to_rom(SHEET_MAP_DICT))
+        for r in (r for r in range(32) if r not in TEXT_ROWS):
+            for c in range(32):
+                i = (r * 32 + c) * 2
+                if i + 1 < len(m):
+                    used.add((m[i] | (m[i + 1] << 8)) & 0x3FF)
+    return set(range(SHEET_TILES)) - used
+
+
 # The game over screen writes げーむ おーばー with a 24x24 font of its own (three tile rows of the
-# sheet at $9B:8000, placed by the tilemap at $92:9C99). Korean goes into free tiles of that sheet.
-# Four screens share this sheet, so the nine tiles of each syllable go into different free runs.
-GAMEOVER = dict(text="게임 오버", row=20, col=9, blocks=(0x130, 0x0B0, 0x112, 0x152),
-                ink=1, back=2, blank=0x2D00, attr=0x2C00, wipe=(7, 26))
+# sheet at $9B:8000, placed by the tilemap at $92:9C99). Korean goes into free tiles of that sheet,
+# nine per syllable, taken in order from `blocks`. The Japanese line's own tiles are no use: its お
+# is the very nine the ending cards draw お with. Up to v0.6.5 these were four runs of nine picked
+# by eye, and three of the runs cut through the victory banners and the sunset ending card.
+GAMEOVER = dict(text="게임 오버", row=20, col=9, ink=1, back=2, blank=0x2D00, attr=0x2C00,
+                wipe=(7, 26),
+                blocks=(0x079, 0x07A, 0x07B, 0x07C, 0x0BF, 0x0CE, 0x0CF, 0x0D9, 0x0EA,
+                        0x0F0, 0x0F1, 0x0FA, 0x0FD, 0x101, 0x102, 0x106, 0x109, 0x10A,
+                        0x10B, 0x10C, 0x112, 0x11A, 0x11B, 0x11C, 0x122, 0x12B, 0x12C,
+                        0x133, 0x134, 0x135, 0x13B, 0x13C, 0x147, 0x14A, 0x157, 0x158))
 
 
 def block_tiles(ch, back, ink):
@@ -246,6 +275,51 @@ def thanks():
     return out
 
 
+# The victory screen hangs two banners down the school wall, both in this same sheet and both two
+# tiles wide: 祝優勝!! in the left one (tile column 0, rows 7-14) and おめでとう in the right
+# (column 2, rows 8-15). Its tilemap already points at those tiles, so only the art changes.
+# The two girls stand in front of the wall and hide everything below screen line 110, so the
+# Korean stops there: the left banner keeps the `!!` of its last two tile rows, which no one ever
+# sees, and the right one has its bottom two rows wiped instead of holding a う nobody reads.
+# 祝 is painted apart from 優勝 on the original banner, the way a Korean banner writes 축 apart
+# from 우승, so the colours are kept one per syllable.
+BANNERS = (dict(col=0, row=7, rows=6, back=1, x=1, w=13, h=13, top=3, pitch=15,
+                ink=(("축", 7), ("우", 8), ("승", 8))),
+           dict(col=2, row=8, rows=8, back=1, x=1, w=13, h=13, top=2, pitch=15,
+                ink=(("축", 9), ("하", 9), ("해", 9))))
+
+
+def banner_glyph(ch, w, h):
+    """Galmuri11's glyph stretched to fill a w x h box.
+
+    `scaled_glyph` keeps the font's 16px cell, in which a Hangul syllable is 11px wide, so it
+    would leave a banner letter filling two thirds of the cloth. A painted banner runs edge to
+    edge, so the glyph's own ink box is what gets stretched."""
+    _, cell = glyphs.render(ch)
+    rows = [[(v >> (15 - x)) & 1 for x in range(16)] for v in cell]
+    ys = [y for y, r in enumerate(rows) if any(r)]
+    xs = [x for r in rows for x, v in enumerate(r) if v]
+    box = [r[min(xs):max(xs) + 1] for r in rows[ys[0]:ys[-1] + 1]]
+    return [[box[y * len(box) // h][x * len(box[0]) // w] for x in range(w)] for y in range(h)]
+
+
+def victory():
+    """{sheet byte offset: 32 bytes} for the two banners of the victory screen."""
+    out = {}
+    for b in BANNERS:
+        px = [[b["back"]] * 16 for _ in range(b["rows"] * 8)]
+        for i, (ch, colour) in enumerate(b["ink"]):
+            for y, row in enumerate(banner_glyph(ch, b["w"], b["h"])):
+                for x, v in enumerate(row):
+                    if v:
+                        px[b["top"] + i * b["pitch"] + y][b["x"] + x] = colour
+        for r in range(b["rows"]):
+            for c in range(2):
+                out[((b["row"] + r) * 16 + b["col"] + c) * 32] = encode_tile(
+                    [row[c * 8:c * 8 + 8] for row in px[r * 8:r * 8 + 8]])
+    return out
+
+
 def gameover():
     """({sheet byte offset: 32 bytes}, {tilemap byte offset: word}) for the game over line."""
     g = GAMEOVER
@@ -255,12 +329,12 @@ def gameover():
         if ch == " ":
             col += 2
             continue
-        t = next(block)
-        for i, data in enumerate(block_tiles(ch, g["back"], g["ink"])):
-            tiles[(t + i) * 32] = data
+        nine = [next(block) for _ in range(9)]
+        for t, data in zip(nine, block_tiles(ch, g["back"], g["ink"])):
+            tiles[t * 32] = data
         for r in range(3):
             for c in range(3):
-                tmap[((g["row"] + r) * 32 + col + c) * 2] = g["attr"] | (t + r * 3 + c)
+                tmap[((g["row"] + r) * 32 + col + c) * 2] = g["attr"] | nine[r * 3 + c]
         col += 3
     for r in range(3):                       # wipe the cells the Japanese line used
         for c in range(*g["wipe"]):

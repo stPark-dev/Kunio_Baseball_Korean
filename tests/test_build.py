@@ -314,3 +314,42 @@ def test_no_task_yield_from_nested_code():
     # back at $1FFF, so yielding from inside our nested calls corrupts it and crashes.
     src = open("tools/kbb/asm/text.s", encoding="utf-8").read()
     assert "jsl TASK_WAIT" not in src
+
+
+def test_game_over_syllables_sit_on_nine_tiles_each():
+    from tools.kbb import titlelogo
+    blocks = titlelogo.GAMEOVER["blocks"]
+    letters = [c for c in titlelogo.GAMEOVER["text"] if c != " "]
+    assert len(blocks) == 9 * len(letters)
+    assert len(set(blocks)) == len(blocks)
+
+
+def test_game_over_tiles_keep_off_the_victory_banners():
+    # Until v0.6.5 the game over line took four runs of nine tiles that ran straight through the
+    # banners of the victory screen, which shares this sheet: it rubbed out 勝 and で.
+    from tools.kbb import titlelogo
+    banners = {off // 32 for off in titlelogo.victory()}
+    assert banners.isdisjoint(titlelogo.GAMEOVER["blocks"])
+    assert banners.isdisjoint(titlelogo.THANKS["tiles"])
+    assert set(titlelogo.GAMEOVER["blocks"]).isdisjoint(titlelogo.THANKS["tiles"])
+
+
+def test_victory_banners_cover_whole_tiles_in_their_own_colours():
+    from tools.kbb import sprtext, titlelogo
+    tiles = titlelogo.victory()
+    for b in titlelogo.BANNERS:
+        want = {((b["row"] + r) * 16 + b["col"] + c) * 32
+                for r in range(b["rows"]) for c in range(2)}
+        assert want <= set(tiles)
+        colours = {v for off in want for row in sprtext.decode4(tiles[off]) for v in row}
+        assert colours <= {b["back"]} | {ink for _, ink in b["ink"]}
+        assert colours != {b["back"]}                     # something was actually drawn
+    assert all(len(d) == 32 for d in tiles.values())
+
+
+def test_banner_glyph_fills_its_box():
+    from tools.kbb import titlelogo
+    g = titlelogo.banner_glyph("축", 13, 13)
+    assert len(g) == 13 and all(len(r) == 13 for r in g)
+    assert any(g[0]) and any(g[-1])                       # ink touches top and bottom
+    assert any(r[0] for r in g) and any(r[-1] for r in g)  # and both sides
