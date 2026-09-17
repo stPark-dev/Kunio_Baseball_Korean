@@ -421,3 +421,27 @@ def test_row_hooks_read_the_attribute_from_the_row_not_the_table():
     assert len(sites) == 2
     for i in sites:
         assert lines[i - 4:i] == ["lda f:Q_X", "tax", "lda a:$0000,x", "and #$FC00"]
+
+
+def label_widths():
+    """[(id, korean, px, budget)] for every translated label, in file order."""
+    import csv
+    from tools.kbb import encode, glyphs
+    out = []
+    with open("translations/labels.csv", encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            if not r["korean"].strip():
+                continue
+            px = sum(encode.SPACE_W if c == " " else (glyphs.render(c) or (12,))[0]
+                     for c in r["korean"])
+            out.append((r["id"], r["korean"], px, int(r["n"]) * 8))
+    return out
+
+
+def test_labels_fit_the_cells_their_row_has():
+    # Each menu box is exactly `n` cells wide, so a label that overruns paints over the box border
+    # and into its neighbour: "열혈 구장" (54px in 40) ran straight through "네오 구장".
+    # "OK" is the one exception: it is 1px over two cells, and its box has room to spare (checked
+    # on the mode-select screen against the Japanese original).
+    over = [(i, k, px, cap) for i, k, px, cap in label_widths() if px > cap]
+    assert over == [("rec_088C9F_18", "OK", 17, 16)]
