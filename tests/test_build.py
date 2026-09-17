@@ -409,3 +409,15 @@ def test_news_record_is_a_command_16_for_the_headline_map():
     rom[news.MAP_RECORD:news.MAP_RECORD + 10] = news.record(news.MAP_STREAM, news.MAP_DICT)
     assert rom[news.MAP_RECORD] == lz.CMD
     assert news.record(0xB68000, 0xB68000)[4:] == bytes((0x00, 0x80, 0xB6, 0x00, 0x80, 0xB6))
+
+
+def test_row_hooks_read_the_attribute_from_the_row_not_the_table():
+    # `rows8_find` scans with X, so on return X indexes its table, not the row. Both row hooks must
+    # put the row's own address back before reading its attribute word. The MVN one did not, so the
+    # title screen's "버튼을 눌러 주세요" was drawn without the row's priority bit and stayed hidden
+    # behind the pitch.
+    lines = [l.split(";")[0].strip() for l in open("tools/kbb/asm/text.s", encoding="utf-8")]
+    sites = [i for i, l in enumerate(lines) if l == "sta f:Q_ATTR"]
+    assert len(sites) == 2
+    for i in sites:
+        assert lines[i - 4:i] == ["lda f:Q_X", "tax", "lda a:$0000,x", "and #$FC00"]

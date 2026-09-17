@@ -2685,7 +2685,9 @@ kbb_mvn:
         sta f:Q_CELLS
         lda 2,s
         sta f:Q_BUF             ; destination address in bank $7F
-        lda a:$0000,x
+        lda f:Q_X               ; rows8_find left X on its own table
+        tax
+        lda a:$0000,x           ; attribute of the original row
         and #$FC00
         sta f:Q_ATTR
         lda f:T_DST
