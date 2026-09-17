@@ -2576,7 +2576,7 @@ map_labels:
         lda #$007F
         sta z_buf+2
         phx
-        tax
+        ldx z_buf               ; the row's address: A still holds the #$007F of the line above
         lda f:$7F0000,x
         plx
         cmp f:MAPLABELS+4,x

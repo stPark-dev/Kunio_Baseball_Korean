@@ -466,3 +466,15 @@ def test_reserved_glyphs_cover_the_next_opponent_screen():
     for ch in "本塁":
         assert ch in build.RESERVED_GLYPHS, ch
         assert ch in KANJI16, ch
+
+
+def test_map_label_check_reads_the_row_not_a_constant():
+    # `map_labels` recognises one of its rows by the first word the scene's tilemap buffer holds
+    # there. It loaded that address into X with a bare `tax`, but A still held the #$007F of the
+    # line above, so every screen compared $7F:007F instead and no row ever matched: the rows kept
+    # their original 16x16 kanji, which is why the label pool overwriting those glyphs showed up
+    # as 본루타 -> ㄷㅜ타 (v0.6.13).
+    src = open("tools/kbb/asm/text.s", encoding="utf-8").read()
+    body = src[src.index("map_labels:"):]
+    read = body[:body.index("cmp f:MAPLABELS+4,x")]
+    assert "ldx z_buf" in read.rsplit("phx", 1)[-1]
