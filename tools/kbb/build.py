@@ -118,6 +118,14 @@ def patches(table_addr, game_text=GAME_TEXT):
         (0x086A2B, b"\xA5\x10\x8F\x2B\x2F\x7E", jml(ENTRY_MAIN) + b"\xEA\xEA"),   # main loop head
         (0x086BF7, b"\xA5\x10\x8F\x2B\x2F\x7E", jml(ENTRY_NESTED) + b"\xEA\xEA"), # nested loop head
         (0x007F0C, b"\xB1\xF6\x80", struct.pack("<I", ENTRY_NMI)[:3]),            # NMI vector
+        # The OAM upload job ($80:815C) switches HDMA off and leaves it off; a later NMI job
+        # ($80:E8E4) switches it back on. Our NMI hook runs ahead of all of them, and on the
+        # frame a message turns over that is enough to push the re-enable past the start of the
+        # picture, so that frame loses its per-scanline $212C and $210E: the black bands and the
+        # sprites vanish for one frame. HDMA only transfers during the picture, never in the
+        # blank the OAM copy runs in, so the disable protects nothing - dropping it closes the
+        # window. ($421x are never HDMA targets, and every $80:E8xx routine ends with HDMA on.)
+        (0x000164, b"\x9C\x0C\x42", b"\xEA\xEA\xEA"),                            # STZ $420C -> NOP
         (ROW_WRITER_ROM, b"\x08\x8B\x0B\xC2\x30", jml(ENTRY_LABEL) + b"\xEA"),     # label row writer
     ]
     game = [
