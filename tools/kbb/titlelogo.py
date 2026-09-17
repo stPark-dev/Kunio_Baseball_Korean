@@ -320,6 +320,34 @@ def victory():
     return out
 
 
+# All three ending cards (night city, sunset, and the school of the victory screen) close with
+# おわり in the 24x24 font, and all three place it in the same cells: two blocks of nine tiles and
+# one of six, on a background of tile `0x011`, which is solid colour 2. Korean says it in one
+# syllable, so the middle block becomes 끝 and the other two are painted out in that colour --
+# no tilemap has to change, and the line stays where it was.
+ENDING = dict(text="끝", back=2, fill=1, outline=8, size=20,
+              block=(0x049, 0x04A, 0x04B, 0x059, 0x05A, 0x05B, 0x069, 0x06A, 0x06B),
+              wipe=(0x046, 0x047, 0x048, 0x056, 0x057, 0x058, 0x066, 0x067, 0x068,
+                    0x076, 0x077, 0x078, 0x086, 0x087, 0x088))
+
+
+def ending():
+    """{sheet byte offset: 32 bytes} for the last line of the ending cards."""
+    e = ENDING
+    pad = (24 - e["size"]) // 2
+    ink = [[0] * 24 for _ in range(24)]
+    for y, row in enumerate(banner_glyph(e["text"], e["size"], e["size"])):
+        for x, v in enumerate(row):
+            ink[pad + y][pad + x] = v
+    px = [[v or e["back"] for v in row]
+          for row in styled(ink, None, (e["fill"], e["fill"], (e["outline"],)))]
+    out = {t * 32: encode_tile([[e["back"]] * 8] * 8) for t in e["wipe"]}
+    for i, t in enumerate(e["block"]):
+        r, c = i // 3, i % 3
+        out[t * 32] = encode_tile([row[c * 8:c * 8 + 8] for row in px[r * 8:r * 8 + 8]])
+    return out
+
+
 def gameover():
     """({sheet byte offset: 32 bytes}, {tilemap byte offset: word}) for the game over line."""
     g = GAMEOVER

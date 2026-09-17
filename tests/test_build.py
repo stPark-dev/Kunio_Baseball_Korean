@@ -353,3 +353,23 @@ def test_banner_glyph_fills_its_box():
     assert len(g) == 13 and all(len(r) == 13 for r in g)
     assert any(g[0]) and any(g[-1])                       # ink touches top and bottom
     assert any(r[0] for r in g) and any(r[-1] for r in g)  # and both sides
+
+
+def test_ending_card_repaints_the_whole_owari_line():
+    from tools.kbb import sprtext, titlelogo
+    e = titlelogo.ENDING
+    tiles = titlelogo.ending()
+    assert set(tiles) == {t * 32 for t in e["block"] + e["wipe"]}
+    assert all(len(d) == 32 for d in tiles.values())
+    for t in e["wipe"]:                                   # お and り are painted out
+        assert {v for row in sprtext.decode4(tiles[t * 32]) for v in row} == {e["back"]}
+    drawn = {v for t in e["block"] for row in sprtext.decode4(tiles[t * 32]) for v in row}
+    assert drawn == {e["back"], e["fill"], e["outline"]}
+
+
+def test_ending_tiles_keep_off_the_other_lines_of_the_sheet():
+    from tools.kbb import titlelogo
+    ending = {off // 32 for off in titlelogo.ending()}
+    assert ending.isdisjoint(titlelogo.GAMEOVER["blocks"])
+    assert ending.isdisjoint(titlelogo.THANKS["tiles"])
+    assert ending.isdisjoint({off // 32 for off in titlelogo.victory()})

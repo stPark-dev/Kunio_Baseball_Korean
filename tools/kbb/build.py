@@ -242,11 +242,13 @@ def screen_patches(original, rom):
         rom[off:off + len(tile)] = tile
     over_tiles, over_map = titlelogo.gameover()
     free = titlelogo.free_tiles(original)
-    taken = sorted(t for t in titlelogo.GAMEOVER["blocks"] if t not in free)
+    taken = sorted(t for t in titlelogo.GAMEOVER["blocks"] + titlelogo.ENDING["block"]
+                   if t not in free)
     if taken:                                # a tile another screen of this sheet still shows
-        raise BuildError("game over tiles in use: %s" % " ".join("%03X" % t for t in taken))
+        raise BuildError("text tiles in use: %s" % " ".join("%03X" % t for t in taken))
     over_tiles.update(titlelogo.thanks())
     over_tiles.update(titlelogo.victory())
+    over_tiles.update(titlelogo.ending())
     runs = ((LOGO_SHEET, {0x4000 + t * 32: d for t, d in tiles.items()}), (LOGO_MAP, tmap),
             (OVER_SHEET, over_tiles), (OVER_MAP, over_map))
     blobs, data = [], bytearray()
