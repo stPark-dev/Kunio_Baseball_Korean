@@ -455,3 +455,14 @@ def test_labels_fit_the_cells_their_row_has():
     # (54px in 40) ended flush against the border and read as one word with "네오 구장" next to it.
     over = {i: k for i, k, px, cap in label_widths() if px > cap}
     assert over == WIDE_LABELS
+
+
+def test_reserved_glyphs_cover_the_next_opponent_screen():
+    # That screen's 本塁打 / 盗塁 come from the 16x16 font, not the label pool: its tilemap is
+    # uploaded with script command 10, which no hook sees, so `map_labels` never replaces those
+    # rows and kanji16.KOREAN16 is what makes them Korean. The pool shares those tiles, so it has
+    # to be told to skip them - it was not, and 본루타 came out as ㄷㅜ타, 도루 as 도ㅜ.
+    from tools.kbb.kanji16 import KANJI16
+    for ch in "本塁":
+        assert ch in build.RESERVED_GLYPHS, ch
+        assert ch in KANJI16, ch

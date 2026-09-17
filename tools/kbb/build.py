@@ -81,7 +81,7 @@ GAME_TEXT = True
 LABEL_TABLE_ROM = CODE_ROM + 0x4000          # $B1:C000, u16 string offsets then strings
 RESERVED_ROM = CODE_ROM + 0x3F00             # $B1:BF00, 64-byte bitmap of kanji tiles to keep
 # 16x16 glyphs drawn by screens whose data is not located yet (versus title, pre-game menu)
-RESERVED_GLYPHS = "熱血野球大会対先発火小変更打順守備選手デタ自敵チム第回戦交代使用野次気合勝負ちけ"
+RESERVED_GLYPHS = "熱血野球大会対先発火小変更打順守備選手デタ自敵チム第回戦交代使用野次気合勝負ちけ本塁"
 # glyph indices the reading table cannot name: 8x16 digit pairs 01..89, ［ ］ !, ・ (the "." of .225),
 # 野次気合 / アイテム of the time-out menu (see kanji16.KOREAN16_IDX)
 RESERVED_INDICES = (0x57, 0x5F, 0x67, 0x6F, 0x77, 0x7B, 0x49, 0x41, 0x42, 0x43, 0x44, 0x07, 0x47, 0x4F)
