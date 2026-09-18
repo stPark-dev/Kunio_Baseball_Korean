@@ -90,7 +90,15 @@ LABEL_ROW_BOTTOM = 0x1000                    # set in a site entry for the botto
 ROW_WRITER_ROM = 0x08B390
 
 WIDE_PX = 248          # dialogue window: columns 1..31
-MENU_PX = 208          # menu message window: columns 6..31
+# Which window a message is drawn in is the game's T_X when it prints, not anything in the script,
+# so it was measured: kbb_start logged (string pointer, T_X) for a run and the pointers were decoded
+# against the script bank. That run saw three windows -- T_X = 1 (the dialogue window, every story
+# line it reached), T_X = 6 (the navigator's menu window) and T_X = 7 (the pre-game menu's). Only
+# the ids seen in a narrow one are checked against it; everything else keeps the 248px check.
+# Checking every story line at 208px instead, as this did until v0.6.15, only ever printed notes
+# about dialogue that is drawn at 248px and never overflows.
+NARROW_WINDOWS = {208: ("story_121", "story_168", "story_169"),   # T_X = 6, columns 6..31
+                  200: ("story_437", "story_451")}                # T_X = 7, columns 7..31
 HEADER_CHECKSUM = 0x7FDE
 HEADER_COMPLEMENT = 0x7FDC
 
@@ -419,9 +427,10 @@ def build(original, csv_path=None, labels_csv=None, ingame_csv=None, bg2_csv=Non
     translated = {k: v for k, v in texts.items() if k in korean_ids}
     for sid, lines in encode.check(translated, width_of, max_px=WIDE_PX):
         log("overflow (>2 lines at %dpx): %s -> %s" % (WIDE_PX, sid, [l for l, _ in lines]))
-    for sid, lines in encode.check({k: v for k, v in translated.items() if k.startswith("story_")},
-                                   width_of, max_px=MENU_PX):
-        log("note (>2 lines in the %dpx menu window): %s" % (MENU_PX, sid))
+    for px, group in sorted(NARROW_WINDOWS.items()):
+        for sid, lines in encode.check({k: v for k, v in translated.items() if k in group},
+                                       width_of, max_px=px):
+            log("overflow (>2 lines in the %dpx window): %s -> %s" % (px, sid, [l for l, _ in lines]))
     game_ids = {"story_%03d" % k for k in list(range(130, 334)) + list(range(687, 694))}
     for sid, lines in encode.check({k: v for k, v in translated.items() if k in game_ids},
                                    width_of, max_px=GAME_PX):

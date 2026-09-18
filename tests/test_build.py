@@ -478,3 +478,20 @@ def test_map_label_check_reads_the_row_not_a_constant():
     body = src[src.index("map_labels:"):]
     read = body[:body.index("cmp f:MAPLABELS+4,x")]
     assert "ldx z_buf" in read.rsplit("phx", 1)[-1]
+
+
+def test_narrow_window_sets_name_real_messages():
+    # Which window a message is drawn in is the game's T_X at the time, not anything in the script,
+    # so the sets are measured (see README, 번역 작성 규칙). Each message belongs to one window and
+    # every narrow window is narrower than the dialogue one.
+    import csv
+    with open("translations/strings.csv", encoding="utf-8") as f:
+        ids = {r["id"] for r in csv.DictReader(f)}
+    seen = set()
+    for px, group in build.NARROW_WINDOWS.items():
+        assert 0 < px < build.WIDE_PX
+        assert group
+        for sid in group:
+            assert sid in ids, sid
+            assert sid not in seen, sid
+            seen.add(sid)
